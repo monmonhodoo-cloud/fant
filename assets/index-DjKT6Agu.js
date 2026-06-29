@@ -1701,13 +1701,21 @@ import{t as e}from"./rolldown-runtime-lhHHWwHU.js";import{A as t,B as n,C as r,D
       ${i}
       ${a}
     </div>
-  `}function dD(e){return[...e].sort((e,t)=>{let n=pD(e)-pD(t);return n===0?String(e.id||``).localeCompare(String(t.id||``)):n})}function fD(e){return[...e].sort((e,t)=>{let n=pD(t)-pD(e);return n===0?String(t.id||``).localeCompare(String(e.id||``)):n})}function pD(e){let t=e.timestamp;if(t?.toMillis)return t.toMillis();if(t instanceof Date)return t.getTime();if(typeof t==`number`)return t;let n=Date.parse(e.date||``);return Number.isFinite(n)?n:0}function mD(e){return`${Number(e||0).toLocaleString()}개`}function hD(e){return String(e??``).replaceAll(`&`,`&amp;`).replaceAll(`<`,`&lt;`).replaceAll(`>`,`&gt;`).replaceAll(`"`,`&quot;`).replaceAll(`'`,`&#39;`)}function gD(e,t){let n=e===`in`;SD(`
-    <h3 class="modal-title">계란 ${n?`입고`:`출고`}</h3>
-    <p style="font-size:12px;color:#888;margin-bottom:16px;">현재 재고: ${t.currentQty}개</p>
+  `}function dD(e){return[...e].sort((e,t)=>{let n=pD(e)-pD(t);return n===0?String(e.id||``).localeCompare(String(t.id||``)):n})}function fD(e){return[...e].sort((e,t)=>{let n=pD(t)-pD(e);return n===0?String(t.id||``).localeCompare(String(e.id||``)):n})}function pD(e){let t=e.timestamp;if(t?.toMillis)return t.toMillis();if(t instanceof Date)return t.getTime();if(typeof t==`number`)return t;let n=Date.parse(e.date||``);return Number.isFinite(n)?n:0}function mD(e){return`${Number(e||0).toLocaleString()}개`}function hD(e){return String(e??``).replaceAll(`&`,`&amp;`).replaceAll(`<`,`&lt;`).replaceAll(`>`,`&gt;`).replaceAll(`"`,`&quot;`).replaceAll(`'`,`&#39;`)}function gD(e,t){let n=e===`in`,r=Number(t.currentQty||0),i=n?`
     <div class="form-group">
       <label>수량(개) *</label>
       <input type="number" id="m_qty" placeholder="개수 입력" />
     </div>
+  `:`
+    <div class="form-group">
+      <label>남은 재고(개) *</label>
+      <input type="number" id="m_remaining" placeholder="실사 후 남은 개수" min="0" max="${r}" />
+      <div id="m_outPreview" style="font-size:12px;color:#888;margin-top:4px;">출고량: -</div>
+    </div>
+  `;SD(`
+    <h3 class="modal-title">계란 ${n?`입고`:`출고`}</h3>
+    <p style="font-size:12px;color:#888;margin-bottom:16px;">현재 재고: ${r}개</p>
+    ${i}
     <div class="form-group">
       <label>날짜</label>
       <input type="date" id="m_date" value="${z()}" />
@@ -1727,7 +1735,7 @@ import{t as e}from"./rolldown-runtime-lhHHWwHU.js";import{A as t,B as n,C as r,D
       <button class="btn-secondary" onclick="closeModal()">취소</button>
       <button class="btn-primary" id="btnSaveEgg">${n?`입고`:`출고`}</button>
     </div>
-  `),document.getElementById(`btnSaveEgg`).addEventListener(`click`,async()=>{let e=parseInt(document.getElementById(`m_qty`).value),r=document.getElementById(`m_date`).value,i=document.getElementById(`m_staff`).value,a=document.getElementById(`m_note`).value;if(!e||!r){alert(`수량과 날짜는 필수입니다.`);return}if(!i){alert(`담당자는 필수입니다.`);return}if(!n&&e>t.currentQty){alert(`재고가 부족합니다.`);return}if(await Wu(r))return;let o=n?e:-e,s=t.currentQty,c=s+o;await ce(k(I,`eggStock`,`global`),{currentQty:c,minimumQty:t.minimumQty,updatedAt:new Date}),await M(A(I,`eggLogs`),{date:r,timestamp:new Date,type:n?`in`:`out`,qty:o,before:s,after:c,staffName:i,note:a}),await wo({action:`egg`,subAction:n?`in`:`out`,date:r,staff:i,message:`계란 ${n?`입고`:`출고`} — ${n?`+`:`-`}${e}개 / 담당: ${i}`,details:{delta:o,before:s,after:c,note:a||null}}),closeModal(),cD(await oD(),await sD()),alert(`${n?`입고`:`출고`} 완료!`)})}function _D(e){SD(`
+  `),n||document.getElementById(`m_remaining`).addEventListener(`input`,e=>{let t=parseInt(e.target.value),n=document.getElementById(`m_outPreview`);if(isNaN(t)||t<0)n.textContent=`출고량: -`,n.style.color=`#888`;else{let e=r-t;e<0?(n.textContent=`남은 재고가 현재(${r}개)보다 많습니다`,n.style.color=`#e53e3e`):e===0?(n.textContent=`출고량: 0개 (변동 없음)`,n.style.color=`#888`):(n.textContent=`출고량: ${e}개`,n.style.color=`#2d7a3a`)}}),document.getElementById(`btnSaveEgg`).addEventListener(`click`,async()=>{let e;if(n){if(e=parseInt(document.getElementById(`m_qty`).value),!e){alert(`수량을 입력해주세요.`);return}}else{let t=parseInt(document.getElementById(`m_remaining`).value);if(isNaN(t)||t<0){alert(`남은 재고를 입력해주세요.`);return}if(t>r){alert(`남은 재고가 현재 재고(${r}개)보다 많을 수 없습니다.`);return}if(e=r-t,e===0){alert(`변동이 없습니다. (출고량 0개)`);return}}let i=document.getElementById(`m_date`).value,a=document.getElementById(`m_staff`).value,o=document.getElementById(`m_note`).value;if(!i){alert(`날짜는 필수입니다.`);return}if(!a){alert(`담당자는 필수입니다.`);return}if(await Wu(i))return;let s=n?e:-e,c=t.currentQty,l=c+s;await ce(k(I,`eggStock`,`global`),{currentQty:l,minimumQty:t.minimumQty,updatedAt:new Date}),await M(A(I,`eggLogs`),{date:i,timestamp:new Date,type:n?`in`:`out`,qty:s,before:c,after:l,staffName:a,note:o}),await wo({action:`egg`,subAction:n?`in`:`out`,date:i,staff:a,message:`계란 ${n?`입고`:`출고`} — ${n?`+`:`-`}${e}개 / 담당: ${a}`,details:{delta:s,before:c,after:l,note:o||null}}),closeModal(),cD(await oD(),await sD()),alert(`${n?`입고`:`출고`} 완료!`)})}function _D(e){SD(`
     <h3 class="modal-title">수동 재고 조정</h3>
     <p style="font-size:12px;color:#888;margin-bottom:16px;">현재 재고: ${e.currentQty}개</p>
     <div class="form-row">
