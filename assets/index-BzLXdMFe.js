@@ -2830,7 +2830,7 @@ import{t as e}from"./rolldown-runtime-lhHHWwHU.js";import{A as t,B as n,C as r,D
       <label>입고 담당자 *</label>
       <select id="m_staff">
         <option value="">선택</option>
-        ${Fk([`lead`])}
+        ${Fk(e.type===`egg`?[`senior`]:[`lead`])}
       </select>
     </div>
     <div class="form-group">
