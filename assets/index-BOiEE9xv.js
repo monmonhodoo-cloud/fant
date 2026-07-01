@@ -2139,45 +2139,48 @@ import{t as e}from"./rolldown-runtime-lhHHWwHU.js";import{A as t,B as n,C as r,D
         <span style="font-size:8px;color:${s?`rgba(255,255,255,0.6)`:`#bbb`};">${String(t).padStart(2,`0`)}-${n}</span>
         ${o?`<span style="font-size:7px;color:white;font-weight:700;text-align:center;line-height:1.1;max-width:62px;overflow:hidden;white-space:nowrap;">${zO(o.slice(0,9))}</span>`:``}
       </div>
-    `}a+=`</div>`,e.innerHTML=a,e.querySelectorAll(`.bp-slot`).forEach(e=>{e.addEventListener(`click`,()=>{if(!_O)return;let t=parseInt(e.dataset.idx);if(gO[t]===_O)gO[t]=null;else if(!gO[t]&&r)gO[t]=_O;else return;LO(),RO()})})}function zO(e){return String(e??``).replaceAll(`&`,`&amp;`).replaceAll(`<`,`&lt;`).replaceAll(`>`,`&gt;`).replaceAll(`"`,`&quot;`).replaceAll(`'`,`&#39;`)}function BO(e,t=!1,n=null){let r=document.getElementById(`modalOverlay`);r&&r.remove();let i=n||(t?`780px`:``),a=document.createElement(`div`);a.id=`modalOverlay`,a.className=`modal-overlay`,a.innerHTML=`<div class="modal-box" style="${i?`max-width:${i};`:``}max-height:92vh;overflow-y:auto;">${e}</div>`,document.body.appendChild(a)}window.closeModal=function(){let e=document.getElementById(`modalOverlay`);e&&e.remove()};function VO(e,t,n){let r=e.items||[],i=(t||[]).filter(Boolean).length,a=Array.from({length:mO},(e,r)=>{let i=Math.floor(r/hO)+1,a=r%hO+1,o=t?t[r]:null,s=o?n[o]||`#ccc`:null;return`<div style="
-      height:17mm;border-radius:2mm;
-      display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1mm;
-      border:0.3mm solid ${s?`transparent`:`#ccc`};
-      background:${s||`#f8f8f8`};
-    ">
-      <span style="font-size:7pt;color:${s?`rgba(255,255,255,0.65)`:`#bbb`};">${String(i).padStart(2,`0`)}-${a}</span>
-      ${o?`<span style="font-size:6.5pt;color:white;font-weight:700;text-align:center;line-height:1.2;padding:0 1mm;word-break:keep-all;">${zO(o)}</span>`:``}
-    </div>`}).join(``),o=r.map((e,r)=>{let i=n[e.productName]||pO[r%pO.length],a=(t||[]).filter(t=>t===e.productName).length;return`<div style="display:flex;align-items:center;gap:2mm;font-size:8pt;">
-      <div style="width:8mm;height:4mm;border-radius:1mm;background:${i};flex-shrink:0;"></div>
+    `}a+=`</div>`,e.innerHTML=a,e.querySelectorAll(`.bp-slot`).forEach(e=>{e.addEventListener(`click`,()=>{if(!_O)return;let t=parseInt(e.dataset.idx);if(gO[t]===_O)gO[t]=null;else if(!gO[t]&&r)gO[t]=_O;else return;LO(),RO()})})}function zO(e){return String(e??``).replaceAll(`&`,`&amp;`).replaceAll(`<`,`&lt;`).replaceAll(`>`,`&gt;`).replaceAll(`"`,`&quot;`).replaceAll(`'`,`&#39;`)}function BO(e,t=!1,n=null){let r=document.getElementById(`modalOverlay`);r&&r.remove();let i=n||(t?`780px`:``),a=document.createElement(`div`);a.id=`modalOverlay`,a.className=`modal-overlay`,a.innerHTML=`<div class="modal-box" style="${i?`max-width:${i};`:``}max-height:92vh;overflow-y:auto;">${e}</div>`,document.body.appendChild(a)}window.closeModal=function(){let e=document.getElementById(`modalOverlay`);e&&e.remove()};function VO(e,t,n){let r=e.items||[],i=(t||[]).filter(Boolean).length,a=Array.from({length:mO},(e,r)=>{let i=Math.floor(r/hO)+1,a=r%hO+1,o=t?t[r]:null,s=o?n[o]||`#ccc`:null;return`<div class="cell" style="border-color:${s||`#ccc`};background:${s||`#f9f9f9`};">
+      <span class="cell-num" style="color:${s?`rgba(255,255,255,0.6)`:`#bbb`};">${String(i).padStart(2,`0`)}-${a}</span>
+      ${o?`<span class="cell-name">${zO(o)}</span>`:``}
+    </div>`}).join(``),o=r.map((e,r)=>{let i=n[e.productName]||pO[r%pO.length],a=(t||[]).filter(t=>t===e.productName).length;return`<div class="legend-item">
+      <div class="legend-dot" style="background:${i};"></div>
       <span>${zO(e.productName)}</span>
-      <span style="color:#888;">${a}/${e.panCount}판</span>
-      ${e.isVirtual?`<span style="color:#e67e22;font-size:7pt;">[가상]</span>`:``}
+      <span class="legend-count">${a}/${e.panCount}판${e.isVirtual?` [가상]`:``}</span>
     </div>`}).join(``),s=`<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <title>배치판 ${zO(e.date)}</title>
 <style>
-  @page { size: A4 portrait; margin: 10mm; }
+  @page { size: A4 portrait; margin: 9mm 10mm; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; }
-  .header { margin-bottom: 5mm; }
-  .header h2 { font-size: 13pt; font-weight: 700; }
-  .header p { font-size: 8.5pt; color: #555; margin-top: 1mm; }
-  .direction { display: flex; justify-content: space-between; font-size: 9pt; font-weight: 600; color: #444; margin-bottom: 2.5mm; }
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5mm; width: 100%; }
-  .legend { margin-top: 5mm; display: flex; flex-wrap: wrap; gap: 3mm 6mm; }
+  html, body { width: 190mm; height: 277mm; overflow: hidden; }
+  body { font-family: 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif; }
+  .header { margin-bottom: 3mm; }
+  .header h2 { font-size: 11.5pt; font-weight: 700; }
+  .header p  { font-size: 7.5pt; color: #555; margin-top: 0.8mm; }
+  .direction { display:flex; justify-content:space-between; font-size:8pt; font-weight:700; color:#333; margin-bottom:1.5mm; }
+  .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:1mm; width:100%; }
+  .cell {
+    height: 13.5mm;
+    border-radius: 1.5mm;
+    border: 0.3mm solid;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.5mm;
+  }
+  .cell-num  { font-size: 6.5pt; }
+  .cell-name { font-size: 6pt; color: white; font-weight: 700; text-align: center; line-height: 1.2; padding: 0 1mm; word-break: keep-all; max-width: 100%; overflow: hidden; }
+  .legend { margin-top: 3.5mm; display:flex; flex-wrap:wrap; gap:2mm 5mm; }
+  .legend-item { display:flex; align-items:center; gap:1.5mm; font-size:7.5pt; }
+  .legend-dot { width:5.5mm; height:3.5mm; border-radius:0.8mm; flex-shrink:0; }
+  .legend-count { color:#666; }
 </style>
 </head><body>
 <div class="header">
   <h2>동결건조기 배치판 — ${zO(e.date)}</h2>
   <p>총 ${i}/45칸 배치</p>
 </div>
-<div class="direction">
-  <span>← 도어쪽</span>
-  <span>기계 내부쪽 →</span>
-</div>
+<div class="direction"><span>← 도어쪽</span><span>기계 내부쪽 →</span></div>
 <div class="grid">${a}</div>
 <div class="legend">${o}</div>
-</body></html>`,c=window.open(``,`_blank`,`width=800,height=900`);if(!c){alert(`팝업이 차단되었습니다. 팝업을 허용해주세요.`);return}c.document.write(s),c.document.close(),c.focus(),c.print()}var HO=[],UO=`breadPan`;async function WO(){let e=document.getElementById(`mainContent`);e.innerHTML=`<div style="padding:24px;"><p>동결판 재고 로딩 중...</p></div>`,HO=await CD(),await bk(),UO=`breadPan`,await XO()}async function GO(){return(await w(E(A(I,`frozenPanStock`),se(`date`,`desc`)))).docs.map(e=>({id:e.id,...e.data()}))}async function KO(){return(await w(A(I,`frozenPanLots`))).docs.map(e=>({id:e.id,...e.data()})).filter(e=>!e.closed)}async function qO(){return(await w(A(I,`breadPanLots`))).docs.map(e=>({id:e.id,...e.data()})).filter(e=>!e.closed)}async function JO(){return(await w(E(A(I,`breadPanLogs`),se(`timestamp`,`desc`)))).docs.map(e=>({id:e.id,...e.data()}))}async function YO(){return(await w(E(A(I,`frozenPanLogs`),se(`timestamp`,`desc`)))).docs.map(e=>({id:e.id,...e.data()}))}async function XO(){ZO(await GO(),await KO(),await qO(),await JO(),await YO())}function ZO(e,t,n,r,i){let a=document.getElementById(`mainContent`);e=e.filter(e=>e.type!==`work`);let o={};t.forEach(e=>{o[e.productName]||(o[e.productName]=[]),o[e.productName].push({date:e.date,remaining:e.remaining,source:e.source||null})});let s={};n.forEach(e=>{s[e.productName]||(s[e.productName]=[]),s[e.productName].push({date:e.date,remaining:e.remaining})});let c=lO(n.reduce((e,t)=>e+(t.remaining||0),0)),l=dO(c),u=t.reduce((e,t)=>e+(t.remaining||0),0);a.innerHTML=`
+</body></html>`,c=window.open(``,`_blank`,`width=820,height=1000`);if(!c){alert(`팝업이 차단되었습니다. 팝업을 허용해주세요.`);return}c.document.write(s),c.document.close(),c.focus(),c.print()}var HO=[],UO=`breadPan`;async function WO(){let e=document.getElementById(`mainContent`);e.innerHTML=`<div style="padding:24px;"><p>동결판 재고 로딩 중...</p></div>`,HO=await CD(),await bk(),UO=`breadPan`,await XO()}async function GO(){return(await w(E(A(I,`frozenPanStock`),se(`date`,`desc`)))).docs.map(e=>({id:e.id,...e.data()}))}async function KO(){return(await w(A(I,`frozenPanLots`))).docs.map(e=>({id:e.id,...e.data()})).filter(e=>!e.closed)}async function qO(){return(await w(A(I,`breadPanLots`))).docs.map(e=>({id:e.id,...e.data()})).filter(e=>!e.closed)}async function JO(){return(await w(E(A(I,`breadPanLogs`),se(`timestamp`,`desc`)))).docs.map(e=>({id:e.id,...e.data()}))}async function YO(){return(await w(E(A(I,`frozenPanLogs`),se(`timestamp`,`desc`)))).docs.map(e=>({id:e.id,...e.data()}))}async function XO(){ZO(await GO(),await KO(),await qO(),await JO(),await YO())}function ZO(e,t,n,r,i){let a=document.getElementById(`mainContent`);e=e.filter(e=>e.type!==`work`);let o={};t.forEach(e=>{o[e.productName]||(o[e.productName]=[]),o[e.productName].push({date:e.date,remaining:e.remaining,source:e.source||null})});let s={};n.forEach(e=>{s[e.productName]||(s[e.productName]=[]),s[e.productName].push({date:e.date,remaining:e.remaining})});let c=lO(n.reduce((e,t)=>e+(t.remaining||0),0)),l=dO(c),u=t.reduce((e,t)=>e+(t.remaining||0),0);a.innerHTML=`
     <div class="page-wrap">
       <div class="page-header">
         <h2 class="page-title">동결판 재고</h2>
