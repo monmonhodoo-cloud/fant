@@ -245,13 +245,25 @@ function escapeHtml(value) {
 
 function showEggModal(type, eggStock) {
   const isIn = type === 'in';
-  showModal(`
-    <h3 class="modal-title">계란 ${isIn ? '입고' : '출고'}</h3>
-    <p style="font-size:12px;color:#888;margin-bottom:16px;">현재 재고: ${eggStock.currentQty}개</p>
+  const currentQty = Number(eggStock.currentQty || 0);
+
+  const outQtyFormGroup = isIn ? `
     <div class="form-group">
       <label>수량(개) *</label>
       <input type="number" id="m_qty" placeholder="개수 입력" />
     </div>
+  ` : `
+    <div class="form-group">
+      <label>남은 재고(개) *</label>
+      <input type="number" id="m_remaining" placeholder="실사 후 남은 개수" min="0" max="${currentQty}" />
+      <div id="m_outPreview" style="font-size:12px;color:#888;margin-top:4px;">출고량: -</div>
+    </div>
+  `;
+
+  showModal(`
+    <h3 class="modal-title">계란 ${isIn ? '입고' : '출고'}</h3>
+    <p style="font-size:12px;color:#888;margin-bottom:16px;">현재 재고: ${currentQty}개</p>
+    ${outQtyFormGroup}
     <div class="form-group">
       <label>날짜</label>
       <input type="date" id="m_date" value="${getToday()}" />
@@ -273,15 +285,47 @@ function showEggModal(type, eggStock) {
     </div>
   `);
 
+  if (!isIn) {
+    document.getElementById('m_remaining').addEventListener('input', (e) => {
+      const remaining = parseInt(e.target.value);
+      const preview = document.getElementById('m_outPreview');
+      if (isNaN(remaining) || remaining < 0) {
+        preview.textContent = '출고량: -';
+        preview.style.color = '#888';
+      } else {
+        const outQty = currentQty - remaining;
+        if (outQty < 0) {
+          preview.textContent = `남은 재고가 현재(${currentQty}개)보다 많습니다`;
+          preview.style.color = '#e53e3e';
+        } else if (outQty === 0) {
+          preview.textContent = '출고량: 0개 (변동 없음)';
+          preview.style.color = '#888';
+        } else {
+          preview.textContent = `출고량: ${outQty}개`;
+          preview.style.color = '#2d7a3a';
+        }
+      }
+    });
+  }
+
   document.getElementById('btnSaveEgg').addEventListener('click', async () => {
-    const qty = parseInt(document.getElementById('m_qty').value);
+    let qty;
+    if (isIn) {
+      qty = parseInt(document.getElementById('m_qty').value);
+      if (!qty) { alert('수량을 입력해주세요.'); return; }
+    } else {
+      const remaining = parseInt(document.getElementById('m_remaining').value);
+      if (isNaN(remaining) || remaining < 0) { alert('남은 재고를 입력해주세요.'); return; }
+      if (remaining > currentQty) { alert(`남은 재고가 현재 재고(${currentQty}개)보다 많을 수 없습니다.`); return; }
+      qty = currentQty - remaining;
+      if (qty === 0) { alert('변동이 없습니다. (출고량 0개)'); return; }
+    }
     const date = document.getElementById('m_date').value;
     const staff = document.getElementById('m_staff').value;
     const note = document.getElementById('m_note').value;
 
-    if (!qty || !date) { alert('수량과 날짜는 필수입니다.'); return; }
+    if (!date) { alert('날짜는 필수입니다.'); return; }
     if (!staff) { alert('담당자는 필수입니다.'); return; }
-    if (!isIn && qty > eggStock.currentQty) { alert('재고가 부족합니다.'); return; }
     if (await blockIfClosed(date)) return;
 
     const delta = isIn ? qty : -qty;

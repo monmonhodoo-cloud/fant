@@ -9,7 +9,7 @@ import { currentUser, currentUserRole } from '../app.js';
 import { showConfirmModal } from '../utils/modal.js';
 import { makeSupplementId } from '../utils/supplement.js';
 import { formatIngredientQtyValue, round2 } from '../utils/number.js';
-import { buildChickenOrderText, copyTextToClipboard } from '../utils/orderCopy.js';
+import { buildChickenOrderText } from '../utils/orderCopy.js';
 import Sortable from 'sortablejs';
 
 let recipes = [];
@@ -295,12 +295,40 @@ function renderProductionLayout() {
 }
 
 function handleCopyOrder() {
-  const text = buildChickenOrderText(productions);
-  if (!text) {
-    alert('복사할 발주 품목이 없습니다.');
-    return;
-  }
-  copyTextToClipboard(text, '발주 복사');
+  const today = new Date(selectedDate);
+  const days = ['일', '월', '화', '수', '목', '금', '토'];
+  const dateStr = `${String(today.getFullYear()).slice(2)}/${today.getMonth() + 1}/${today.getDate()} ${days[today.getDay()]}`;
+
+  const orderText = buildChickenOrderText(productions, recipes);
+  const sheet = orderText
+    ? `📌${dateStr} 발주\n${orderText}`
+    : `📌${dateStr} 발주\n(발주 품목 없음)`;
+
+  showModal(`
+    <h3 class="modal-title">발주 복사</h3>
+    <textarea id="orderSheetText" style="width:100%;height:100px;font-size:13px;padding:12px;border:1px solid #e0e0e0;border-radius:6px;font-family:'Noto Sans KR',sans-serif;resize:none;">${sheet}</textarea>
+    <div class="form-group" style="margin-top:10px;">
+      <label style="font-size:12px;color:#555;display:block;margin-bottom:4px;">비고</label>
+      <input type="text" id="orderSheetNote" placeholder="입력 시 끝줄에 자동 추가됩니다 (비어 있으면 생략)"
+        style="width:100%;font-size:13px;padding:8px 12px;border:1px solid #e0e0e0;border-radius:6px;font-family:'Noto Sans KR',sans-serif;" />
+    </div>
+    <div class="modal-actions">
+      <button class="btn-secondary" onclick="closeModal()">닫기</button>
+      <button class="btn-primary" id="btnCopyOrder2">복사하기</button>
+    </div>
+  `);
+
+  document.getElementById('btnCopyOrder2').addEventListener('click', () => {
+    let text = document.getElementById('orderSheetText').value;
+    const note = document.getElementById('orderSheetNote').value.trim();
+    if (note) {
+      text = text.replace(/\n+$/, '') + '\n' + note;
+    }
+    navigator.clipboard.writeText(text).then(() => {
+      alert('복사 완료!');
+      closeModal();
+    });
+  });
 }
 
 // [Phase 7B-2] 휴일 배지 렌더 (read-only)
@@ -522,13 +550,6 @@ async function showProductionForm(production) {
 
   form.innerHTML = `
     <div style="padding:16px 0;">
-      <div class="form-group" style="margin-bottom:12px;">
-        <label>생산 담당자</label>
-        <select id="pf_staff">
-          <option value="">선택</option>
-          ${getStaffOptions(['office'])}
-        </select>
-      </div>
       <div class="form-group" style="margin-bottom:12px;">
         <label>레시피 *</label>
         <select id="pf_recipe" ${!isNew ? 'disabled' : ''}>
@@ -825,10 +846,9 @@ async function showProductionForm(production) {
     const recipeId = recipeSelect.value;
     const recipe = recipes.find(r => r.id === recipeId);
     const qty = getSelectedQty();
-    const staff = document.getElementById('pf_staff').value;
+    const staff = '';
 
     if (!recipeId) { alert('레시피와 생산단위는 필수입니다.'); return; }
-    if (!staff) { alert('생산 담당자는 필수입니다.'); return; }
     if (isNew && recipe && getUnitPresets(recipe).length === 0) {
       alert('레시피 관리에서 생산단위 프리셋을 먼저 설정해주세요.');
       return;
@@ -885,6 +905,9 @@ async function showProductionForm(production) {
           name: ing.name,
           meatTypeId: ing.meatTypeId || null,
           weightDisplayUnit: ing.weightDisplayUnit === 'kg' ? 'kg' : 'g',
+          isProductionUnit: !!ing.isProductionUnit,
+          unitName: ing.unitName || '',
+          baseWeightG: Number(ing.baseWeightG) || 0,
           // ratio 기반 계산. PU는 ratio=1이므로 savePuTotalG와 같음.
           requiredQtyG: ((Number(ing.baseWeightG) || 0) / savePuBaseWeight) * savePuTotalG,
           autoDeductInventory: ing.autoDeductInventory !== false,
@@ -1222,8 +1245,8 @@ async function showCopySheetModal() {
   const sheetGroups = {
     rawCat: groupForSheet(rawCat).map(g => formatGroup(g, '')),
     rawDog: groupForSheet(rawDog).map(g => formatGroup(g, '')),
-    freezeCat: groupForSheet(freezeCat).map(g => formatGroup(g, '고양이 ')),
-    freezeDog: groupForSheet(freezeDog).map(g => formatGroup(g, '강아지 ')),
+    freezeCat: groupForSheet(freezeCat).map(g => formatGroup(g, '')),
+    freezeDog: groupForSheet(freezeDog).map(g => formatGroup(g, '')),
     freezeCommon: groupForSheet(freezeCommon).map(g => formatGroup(g, '')),
   };
 

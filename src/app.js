@@ -29,11 +29,21 @@ export const MENUS = [
   { id: 'settings', label: '설정', roles: ['admin', 'office'] },
 ];
 
-// 현재 활성 메뉴
-export let currentMenu = 'main';
+// 현재 활성 메뉴 — 우선순위: URL 해시 > 마지막 방문 페이지 > 메인
+// 해시 라우팅: 메뉴마다 #menuId 주소가 붙어 북마크/공유/새로고침 복원 가능
+function getMenuFromHash() {
+  const id = (window.location.hash || '').replace('#', '');
+  return MENUS.some(m => m.id === id) ? id : null;
+}
+
+export let currentMenu = getMenuFromHash() || sessionStorage.getItem('lastMenu') || 'main';
 
 export function setCurrentMenu(menuId) {
   currentMenu = menuId;
+  sessionStorage.setItem('lastMenu', menuId);
+  if ((window.location.hash || '').replace('#', '') !== menuId) {
+    window.location.hash = menuId;
+  }
 }
 
 // 로그아웃

@@ -9,6 +9,7 @@ import { currentUserRole } from '../app.js';
 import { round2, breadToSilicon, breadToFrozenPan } from '../utils/number.js';
 import { showPromptModal, showConfirmModal } from '../utils/modal.js';
 import { recordActivity } from '../services/activityLogs.js';
+import { renderFreezeOpInTab } from './freezeOp.js';
 
 
 let freezeDryRecipes = [];
@@ -31,7 +32,8 @@ async function loadFrozenPanRows() {
 
 async function loadFrozenPanLots() {
   const snap = await getDocs(collection(db, 'frozenPanLots'));
-  return snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(l => !l.closed);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+    .filter(l => !l.closed && Number(l.remaining || 0) > 0);
 }
 
 async function loadBreadPanLots() {
@@ -123,10 +125,16 @@ function renderFrozenPanLayout(rows, lots, breadPanLots, breadPanLogs, frozenPan
           style="padding:10px 20px;background:${activeTab === 'frozenPan' ? '#fff' : '#f5f5f5'};border:1px solid #e8e8e8;border-bottom:${activeTab === 'frozenPan' ? '2px solid white' : 'none'};margin-bottom:-2px;font-size:14px;cursor:pointer;font-weight:${activeTab === 'frozenPan' ? '600' : '400'};color:${activeTab === 'frozenPan' ? '#1a1a1a' : '#888'};">
           동결판 재고
         </button>
+        <button class="tab-btn" data-tab="freezeOp"
+          style="padding:10px 20px;background:${activeTab === 'freezeOp' ? '#fff' : '#f5f5f5'};border:1px solid #e8e8e8;border-bottom:${activeTab === 'freezeOp' ? '2px solid white' : 'none'};margin-bottom:-2px;font-size:14px;cursor:pointer;font-weight:${activeTab === 'freezeOp' ? '600' : '400'};color:${activeTab === 'freezeOp' ? '#1a1a1a' : '#888'};">
+          동결가동
+        </button>
       </div>
 
       <!-- 탭 콘텐츠 -->
-      ${activeTab === 'breadPan' ? renderBreadPanTab(breadLotSummary, breadPanLogs) : renderFrozenPanTab(rows, lotSummary, frozenPanLogs)}
+      ${activeTab === 'breadPan' ? renderBreadPanTab(breadLotSummary, breadPanLogs)
+        : activeTab === 'frozenPan' ? renderFrozenPanTab(rows, lotSummary, frozenPanLogs)
+        : '<div id="freezeOpContent" style="padding:4px 0;">로딩 중...</div>'}
     </div>
   `;
 
@@ -141,8 +149,10 @@ function renderFrozenPanLayout(rows, lots, breadPanLots, breadPanLogs, frozenPan
   // 탭별 이벤트 바인딩
   if (activeTab === 'breadPan') {
     bindBreadPanTabEvents(rows, lots);
-  } else {
+  } else if (activeTab === 'frozenPan') {
     bindFrozenPanTabEvents(rows, lots);
+  } else {
+    renderFreezeOpInTab();
   }
 }
 
@@ -264,7 +274,6 @@ function renderFrozenPanTab(rows, lotSummary, frozenPanLogs) {
     <div class="page-header" style="margin-bottom:12px;">
       <span style="font-size:14px;color:#555;font-weight:600;">동결판 lot 잔량</span>
       <div style="display:flex;gap:8px;">
-        <button class="btn-secondary" id="btnAddOrderRow">+ 발주 행 추가</button>
         <button class="btn-secondary" id="btnFrozenPanAdjust">+ 수동 조정</button>
         <button class="btn-primary" id="btnTenderIn">+ 텐더동결 입고</button>
       </div>
@@ -389,9 +398,6 @@ function bindFrozenPanTabEvents(rows, lots) {
 
   const btnAdjust = document.getElementById('btnFrozenPanAdjust');
   if (btnAdjust) btnAdjust.addEventListener('click', () => showFrozenPanAdjustModal());
-
-  const btnOrderRow = document.getElementById('btnAddOrderRow');
-  if (btnOrderRow) btnOrderRow.addEventListener('click', () => showOrderRowModal(rows, lots));
 
   // 발주 확인 버튼
   document.querySelectorAll('.btn-order-confirm').forEach(btn => {
@@ -1368,138 +1374,6 @@ function recalcRow(item) {
 }
 
 
-function showOrderRowModal(rows, lots) {
-  // 제품별 현재 재고 계산 (자체 lot 합계)
-  const stockByProduct = {};
-  lots.forEach(l => {
-    if (!stockByProduct[l.productName]) stockByProduct[l.productName] = 0;
-    stockByProduct[l.productName] += l.remaining;
-  });
-
-
-  // 재고 표시 옵션 HTML 생성기
-  function getOptionsWithStock() {
-    return freezeDryRecipes.map(r => {
-      const stock = stockByProduct[r.displayName] || 0;
-      return `<option value="${r.displayName}" data-stock="${stock}">${r.displayName} (재고 ${stock}판)</option>`;
-    }).join('');
-  }
-
-  showModal(`
-    <h3 class="modal-title">발주 행 추가</h3>
-    <div class="form-group">
-      <label>날짜 (동결건조 돌리는 날짜)</label>
-      <input type="date" id="m_date" value="${getToday()}" min="${getToday()}" />
-    </div>
-    <div id="orderItems">
-      <div class="order-item" style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
-        <select class="oi-name cell-input" style="flex:1" onchange="updateOrderItemMax(this)">
-          <option value="">선택</option>
-          ${getOptionsWithStock()}
-        </select>
-        <input type="number" class="oi-qty cell-input" placeholder="돌릴 판수" style="width:100px" oninput="updateOrderTotal()" />
-        <span class="oi-stock-info" style="font-size:11px;color:#888;min-width:60px;"></span>
-        <button class="btn-del-row oi-del">✕</button>
-      </div>
-    </div>
-    <button class="btn-secondary" id="btnAddOrderItem" style="margin-bottom:8px;">+ 제품 추가</button>
-    <div style="font-size:13px;font-weight:600;margin-bottom:16px;">
-      총합: <span id="orderTotal" style="color:#e67e22">0</span>판
-      <span style="font-size:11px;color:#aaa;margin-left:8px">(기준: 45판)</span>
-    </div>
-    <div class="modal-actions">
-      <button class="btn-secondary" onclick="closeModal()">취소</button>
-      <button class="btn-primary" id="btnSaveOrderRow">저장</button>
-    </div>
-  `);
-
-  bindOrderItemEvents();
-
-  document.getElementById('btnAddOrderItem').addEventListener('click', () => {
-    document.getElementById('orderItems').insertAdjacentHTML('beforeend', `
-      <div class="order-item" style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
-        <select class="oi-name cell-input" style="flex:1" onchange="updateOrderItemMax(this)">
-          <option value="">선택</option>
-          ${getOptionsWithStock()}
-        </select>
-        <input type="number" class="oi-qty cell-input" placeholder="돌릴 판수" style="width:100px" oninput="updateOrderTotal()" />
-        <span class="oi-stock-info" style="font-size:11px;color:#888;min-width:60px;"></span>
-        <button class="btn-del-row oi-del">✕</button>
-      </div>
-    `);
-    bindOrderItemEvents();
-  });
-
-  document.getElementById('btnSaveOrderRow').addEventListener('click', async () => {
-    const date = document.getElementById('m_date').value;
-    const items = Array.from(document.querySelectorAll('.order-item')).map(row => ({
-      productName: row.querySelector('.oi-name').value.trim(),
-      orderPanQty: parseInt(row.querySelector('.oi-qty').value) || 0,
-    })).filter(i => i.productName);
-
-    if (!date || items.length === 0) { alert('날짜와 제품을 입력해주세요.'); return; }
-    if (await blockIfClosed(date)) return;
-
-    // 재고 부족 검증 (저장 시점 차단)
-    const shortages = [];
-    for (const item of items) {
-      const avail = stockByProduct[item.productName] || 0;
-      if (item.orderPanQty > avail) {
-        shortages.push(`${item.productName}: 재고 ${avail}판 / 발주 ${item.orderPanQty}판`);
-      }
-    }
-    if (shortages.length > 0) {
-      alert(`재고가 부족한 제품이 있습니다.\n\n${shortages.join('\n')}`);
-      return;
-    }
-
-    await addDoc(collection(db, 'frozenPanStock'), {
-      date, type: 'order', status: 'pending',
-      items, createdAt: new Date(), updatedAt: new Date(),
-    });
-
-    closeModal();
-    await refreshFrozenPanLayout();
-    alert('발주 행 추가 완료!');
-  });
-}
-
-function bindOrderItemEvents() {
-  document.querySelectorAll('.oi-del').forEach(btn => {
-    btn.onclick = () => { btn.closest('.order-item').remove(); updateOrderTotal(); };
-  });
-}
-
-window.updateOrderItemMax = function(selectEl) {
-  const stock = parseInt(selectEl.options[selectEl.selectedIndex]?.dataset?.stock || 0);
-  const item = selectEl.closest('.order-item');
-  const qtyInput = item.querySelector('.oi-qty');
-  const stockInfo = item.querySelector('.oi-stock-info');
-
-  qtyInput.max = stock;
-  if (stockInfo) {
-    stockInfo.textContent = stock > 0 ? `최대 ${stock}판` : '재고 없음';
-    stockInfo.style.color = stock === 0 ? '#e53e3e' : '#888';
-  }
-
-  // 현재 입력값이 재고 초과면 빨간색
-  qtyInput.oninput = () => {
-    const v = parseInt(qtyInput.value) || 0;
-    qtyInput.style.color = v > stock ? '#e53e3e' : '#1a1a1a';
-    qtyInput.style.borderColor = v > stock ? '#e53e3e' : '#e0e0e0';
-    updateOrderTotal();
-  };
-};
-
-window.updateOrderTotal = function() {
-  const total = Array.from(document.querySelectorAll('.oi-qty'))
-    .reduce((sum, el) => sum + (parseInt(el.value) || 0), 0);
-  const el = document.getElementById('orderTotal');
-  if (el) {
-    el.textContent = total;
-    el.style.color = total === 45 ? '#2d7a3a' : total > 45 ? '#e53e3e' : '#e67e22';
-  }
-};
 
 async function confirmOrder(row, lots, staff) {
   const items = row.items || [];
