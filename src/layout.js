@@ -8,6 +8,28 @@ import { showConfirmModal } from './utils/modal.js';
 // [Phase 3d] 모달 자동 오픈 1회 플래그 — 모듈 레벨에서 유지
 let blockingModalAutoShown = false;
 
+// 해시 라우팅: 뒤로가기/앞으로가기, 주소 직접 입력 대응
+let hashListenerRegistered = false;
+function registerHashListener() {
+  if (hashListenerRegistered) return;
+  hashListenerRegistered = true;
+  window.addEventListener('hashchange', () => {
+    if (!currentUser) return; // 로그인 전에는 무시
+    const menuId = (window.location.hash || '').replace('#', '');
+    if (!menuId || menuId === currentMenu) return;
+    const menu = MENUS.find(m => m.id === menuId);
+    if (!menu) return;
+    if (menu.roles && !menu.roles.includes(currentUserRole)) {
+      alert('접근 권한이 없는 메뉴입니다.');
+      window.location.hash = currentMenu;
+      return;
+    }
+    setCurrentMenu(menuId);
+    renderLayout();
+    renderPage(menuId);
+  });
+}
+
 // 로그인 사용자 표시: "alice (대표)" 형태
 function getUserBadgeText() {
   const email = currentUser?.email || '';
@@ -80,6 +102,11 @@ export function renderLayout() {
   updateSubbar();
   updateBlockingBanner();
   updateClosingButton();
+  registerHashListener();
+  // 현재 메뉴를 주소에 반영 (직접 접속/새로고침 시)
+  if ((window.location.hash || '').replace('#', '') !== currentMenu) {
+    window.location.hash = currentMenu;
+  }
   renderPage(currentMenu);
 }
 

@@ -2408,11 +2408,13 @@ async function saveTenderFreezeDryReceipt({ p, productName, qty, staffName }) {
 }
 
 function getProductionUnitRowName(p, ingredients) {
-  const unitName = (p.productionUnitName || '').trim();
-  const matched = ingredients.find(ing => ing.name === unitName);
-  if (matched) return matched.name;
-  const inventoryIngredient = ingredients.find(ing => ing.meatTypeId);
-  return inventoryIngredient?.name || unitName || '생산단위';
+  // snapshot 우선 (신규 생산은 isProductionUnit 포함)
+  const fromSnapshot = ingredients.find(i => i.isProductionUnit);
+  if (fromSnapshot) return fromSnapshot.name;
+  // 구형 생산 fallback: 레시피에서 isProductionUnit 재료명
+  const recipe = recipes.find(r => r.id === p.recipeId);
+  const puIng = recipe?.ingredients?.find(i => i.isProductionUnit);
+  return puIng?.name || p.productionUnitName || '생산단위';
 }
 
 function getProductionUnitDisplayUnit(p) {
@@ -2604,8 +2606,8 @@ async function handleTomorrowLoad(runDate) {
 async function gatherTomorrowLoadBlockers(today, targetProductions = nextProductions) {
   const blockers = [];
 
-  // 차단 1, 5 — blockingData 활용 (이미 loadAllData에서 로드됨)
-  // closingChecks.js의 items 중 jumpMenu === 'schedule' 또는 'egg'인 것
+  // 차단 1, 5, 8 — blockingData 활용 (이미 loadAllData에서 로드됨)
+  // closingChecks.js의 items 중 입고 예정, 계란 출고, 제품입고 차단 항목
   blockingData.items.forEach(it => {
     if (it.jumpMenu === 'schedule') {
       // 입고 예정 미완료
@@ -2621,6 +2623,13 @@ async function gatherTomorrowLoadBlockers(today, targetProductions = nextProduct
         text: `🥚 ${it.reason || it.label}`,
         jumpMenu: 'egg',
       });
+    } else if (it.label === '제품입고 미완료') {
+      // 제품입고 미완료
+      blockers.push({
+        kind: 'productTransfer',
+        text: `📦 ${it.reason || it.label}`,
+        jumpMenu: 'main',
+      });
     }
   });
 
@@ -2631,7 +2640,8 @@ async function gatherTomorrowLoadBlockers(today, targetProductions = nextProduct
   for (const p of targetProductions) {
     (p.ingredientsSnapshot || []).forEach(ing => {
       if (ing.autoDeductInventory && ing.meatTypeId) {
-        meatNeeds[ing.meatTypeId] = (meatNeeds[ing.meatTypeId] || 0) + ing.requiredQtyG;
+        if (!meatNeeds[ing.meatTypeId]) meatNeeds[ing.meatTypeId] = { neededG: 0, name: ing.name };
+        meatNeeds[ing.meatTypeId].neededG += ing.requiredQtyG;
       }
     });
     const recipe = recipes.find(r => r.id === p.recipeId);
@@ -2660,7 +2670,22 @@ async function gatherTomorrowLoadBlockers(today, targetProductions = nextProduct
   }
 
   // 원육 부족 (재포장 + 전처리 + 냉동창고 합계 기준)
-  for (const [meatTypeId, neededG] of Object.entries(meatNeeds)) {
+  // meatTypes 이름 조회 (ing.name이 없는 ID만 Firestore fetch)
+  const meatTypeNameMap = {};
+  const unknownIds = Object.entries(meatNeeds)
+    .filter(([, v]) => !v.name)
+    .map(([id]) => id);
+  await Promise.all(unknownIds.map(async id => {
+    try {
+      const snap = await getDoc(doc(db, 'meatTypes', id));
+      if (snap.exists()) meatTypeNameMap[id] = snap.data().name || id;
+      else meatTypeNameMap[id] = id;
+    } catch {
+      meatTypeNameMap[id] = id;
+    }
+  }));
+
+  for (const [meatTypeId, { neededG, name: ingName }] of Object.entries(meatNeeds)) {
     const repackedSum = meatStocks
       .filter(s => s.meatTypeId === meatTypeId && s.stage === 'repacked' && s.remaining > 0)
       .reduce((sum, s) => sum + s.remaining, 0);
@@ -2673,7 +2698,7 @@ async function gatherTomorrowLoadBlockers(today, targetProductions = nextProduct
     const totalAvailable = repackedSum + processedSum + frozenSum;
 
     if (totalAvailable < neededG) {
-      const meatName = meatStocks.find(s => s.meatTypeId === meatTypeId)?.meatNameSnapshot || meatTypeId;
+      const meatName = meatStocks.find(s => s.meatTypeId === meatTypeId)?.meatNameSnapshot || ingName || meatTypeNameMap[meatTypeId] || meatTypeId;
       blockers.push({
         kind: 'meat',
         text: `🥩 ${meatName} 원료 재고 부족 — 필요 ${(neededG/1000).toFixed(1)}kg / 현재 ${(totalAvailable/1000).toFixed(1)}kg (재포장 ${(repackedSum/1000).toFixed(1)} + 전처리 ${(processedSum/1000).toFixed(1)} + 냉동창고 ${(frozenSum/1000).toFixed(1)})`,

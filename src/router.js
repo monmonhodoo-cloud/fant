@@ -7,6 +7,7 @@ import { renderEgg } from './pages/egg.js';
 import { renderFrozenProduct } from './pages/frozenProduct.js';
 import { renderFrozenPan } from './pages/frozenPan.js';
 import { renderFrozenSep } from './pages/frozenSep.js';
+import { renderFreezeOp } from './pages/freezeOp.js';
 import { renderSchedule } from './pages/schedule.js';
 import { renderProduction } from './pages/production.js';
 import { renderMain } from './pages/main.js';
@@ -43,6 +44,9 @@ export async function renderPage(menuId) {
       break;
     case 'frozenPan':
       await renderFrozenPan();
+      break;
+    case 'freezeOp':
+      await renderFreezeOp();
       break;
     case 'frozenSep':
       await renderFrozenSep();

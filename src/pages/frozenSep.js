@@ -1,7 +1,8 @@
 import { db } from '../firebase.js';
 import {
-  collection, getDocs, doc, addDoc, updateDoc, query, orderBy, getDoc, writeBatch
+  collection, getDocs, doc, addDoc, updateDoc, query, orderBy, getDoc, setDoc, writeBatch
 } from 'firebase/firestore';
+import Sortable from 'sortablejs';
 import { currentUserRole } from '../app.js';
 import { getTodayKST as getToday } from '../utils/date.js';
 import { getActiveFreezeDryRecipes, getRecipeOptionsHtml } from '../utils/recipe.js';
@@ -17,14 +18,20 @@ export async function renderFrozenSep() {
   content.innerHTML = `<div style="padding:24px;"><p>동결 분리작업 로딩 중...</p></div>`;
   await loadStaffCache();
   freezeDryRecipes = await getActiveFreezeDryRecipes();
-  const stocks = await loadFrozenSepStocks();
-  renderFrozenSepLayout(stocks);
+  const [stocks, logs] = await Promise.all([loadFrozenSepStocks(), loadFrozenSepLogs(), loadSepProductOrder()]);
+  renderFrozenSepLayout(stocks, logs);
 }
 
 async function loadFrozenSepStocks() {
   const q = query(collection(db, 'frozenSeparation'), orderBy('date', 'desc'));
   const snap = await getDocs(q);
   return snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(s => !s.closed);
+}
+
+async function loadFrozenSepLogs() {
+  const q = query(collection(db, 'frozenSeparationLogs'), orderBy('timestamp', 'desc'));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
 function getSummary(stocks) {
@@ -69,10 +76,142 @@ function getStockTypeTagClass(stockType) {
   return 'tag-freezeDry';
 }
 
-function renderFrozenSepLayout(stocks) {
+// 로그 1건이 (제품, 재고종류)별 잔량에 미치는 영향 [{stockType, delta}]
+function getLogEffects(log) {
+  const qty = Number(log.qty || 0);
+  switch (log.type) {
+    case 'incoming': return [{ stockType: log.toStockType, delta: qty }];
+    case 'separate': return [
+      { stockType: log.fromStockType, delta: -qty },
+      { stockType: log.toStockType, delta: qty },
+    ];
+    case 'out': return [{ stockType: log.fromStockType, delta: -qty }];
+    case 'adjust': return [{ stockType: log.fromStockType, delta: qty }];   // qty = signed delta
+    case 'delete': return [{ stockType: log.fromStockType, delta: qty }];   // qty stored negative
+    default: return [];
+  }
+}
+
+// 현재 잔량에서 로그를 역순으로 걸어가며 각 로그 시점의 "작업 후 잔량" 계산.
+// logs: timestamp desc 정렬. 반환: log.id -> { [stockType]: balanceAfter }
+function computeBalancesAfter(stocks, logs) {
+  const bal = {};
+  stocks.forEach(s => {
+    const key = `${s.productName}|${s.stockType}`;
+    bal[key] = normalizeQty((bal[key] || 0) + Number(s.remaining || 0));
+  });
+
+  const result = {};
+  for (const log of logs) {
+    const effects = getLogEffects(log);
+    const after = {};
+    effects.forEach(e => {
+      if (!e.stockType) return;
+      const key = `${log.productName}|${e.stockType}`;
+      after[e.stockType] = normalizeQty(bal[key] || 0);
+      // 이 로그 이전 상태로 되돌리기
+      bal[key] = normalizeQty((bal[key] || 0) - e.delta);
+    });
+    result[log.id] = after;
+  }
+  return result;
+}
+
+function getLogTypeLabel(type) {
+  return { incoming: '입고', separate: '분리', out: '출고', adjust: '조정', delete: '삭제' }[type] || type;
+}
+
+function getLogTypeColor(type) {
+  return {
+    incoming: '#2d7a3a', separate: '#1f6fb2', out: '#b97a1f',
+    adjust: '#8a5fbf', delete: '#e53e3e',
+  }[type] || '#555';
+}
+
+// 재고 종류별 색상 (뱃지 / 진행률 바)
+const STOCK_TYPE_STYLE = {
+  notSeparated: { bar: '#EF9F27', bg: '#fdf3e0', text: '#b97a1f' },
+  separated:    { bar: '#1D9E75', bg: '#e8f5ea', text: '#2d7a3a' },
+  noSplit:      { bar: '#378ADD', bg: '#e8f0fc', text: '#2d4a8a' },
+};
+
+// 펼침 상태 (재렌더 간 유지)
+const expandedSepProducts = new Set();
+
+// 뷰 모드: 'daily' (일별 현황) | 'product' (제품별 이력)
+let sepViewMode = 'daily';
+
+// 제품 열 순서 (settings/frozenSepProductOrder, 전 계정 공유)
+let sepProductOrder = [];
+
+async function loadSepProductOrder() {
+  try {
+    const snap = await getDoc(doc(db, 'settings', 'frozenSepProductOrder'));
+    sepProductOrder = snap.exists() ? (snap.data().order || []) : [];
+  } catch (err) {
+    console.error('loadSepProductOrder:', err);
+    sepProductOrder = [];
+  }
+}
+
+function sortProductNames(names) {
+  return [...names].sort((a, b) => {
+    const ia = sepProductOrder.indexOf(a);
+    const ib = sepProductOrder.indexOf(b);
+    if (ia !== -1 && ib !== -1) return ia - ib;
+    if (ia !== -1) return -1;
+    if (ib !== -1) return 1;
+    return a.localeCompare(b, 'ko');
+  });
+}
+
+// 날짜별 마감 잔량 스냅샷 계산 — 현재 잔량에서 로그를 날짜 역순으로 걷어냄
+// 반환: { dates: [desc], snapshots: {date: {product|stockType: qty}}, staffByDate: {date: '...'} }
+function computeDailySnapshots(stocks, logs) {
+  const bal = {};
+  stocks.forEach(s => {
+    const key = `${s.productName}|${s.stockType}`;
+    bal[key] = normalizeQty((bal[key] || 0) + Number(s.remaining || 0));
+  });
+
+  const logDates = [...new Set(logs.map(l => l.date).filter(Boolean))].sort().reverse();
+  const today = getToday();
+  const dates = logDates.includes(today) ? logDates : [today, ...logDates.filter(d => d < today)];
+
+  // 날짜 내림차순으로 걷어내기 위한 로그 정렬 (date desc)
+  const sorted = [...logs].filter(l => l.date).sort((a, b) => b.date.localeCompare(a.date));
+  let idx = 0;
+
+  const snapshots = {};
+  const staffByDate = {};
+  for (const d of dates) {
+    // d보다 나중 날짜의 로그를 현재 잔량에서 제거
+    while (idx < sorted.length && sorted[idx].date > d) {
+      const log = sorted[idx];
+      getLogEffects(log).forEach(e => {
+        if (!e.stockType) return;
+        const key = `${log.productName}|${e.stockType}`;
+        bal[key] = normalizeQty((bal[key] || 0) - e.delta);
+      });
+      idx++;
+    }
+    snapshots[d] = { ...bal };
+    const dayStaff = [...new Set(logs.filter(l => l.date === d).map(l => l.staffName).filter(Boolean))];
+    staffByDate[d] = dayStaff.join(', ');
+  }
+  return { dates, snapshots, staffByDate };
+}
+
+function renderFrozenSepLayout(stocks, logs = []) {
   const content = document.getElementById('mainContent');
-  const summary = getSummary(stocks);
   const canDelete = canDeleteFrozenSepStock();
+  const balances = computeBalancesAfter(stocks, logs);
+
+  // 제품 목록: 재고 + 이력에 등장하는 모든 제품
+  const productNames = sortProductNames([...new Set([
+    ...stocks.map(s => s.productName),
+    ...logs.map(l => l.productName).filter(Boolean),
+  ])]);
 
   content.innerHTML = `
     <div class="page-wrap">
@@ -86,60 +225,25 @@ function renderFrozenSepLayout(stocks) {
         </div>
       </div>
 
-      <!-- 요약 -->
-      <div class="form-section" style="background:white;border-radius:8px;padding:16px 20px;margin-bottom:16px;border:1px solid #e8e8e8;">
-        <div style="display:flex;gap:24px;flex-wrap:wrap;">
-          ${Object.entries(summary).length === 0 ? '<span style="color:#aaa;font-size:13px">재고 없음</span>' :
-            Object.entries(summary).map(([name, s]) => `
-              <div>
-                <div style="font-size:12px;font-weight:600;color:#333;margin-bottom:6px;">${name}</div>
-                ${s.notSeparated > 0 ? `<div style="font-size:11px;color:#666">분리X: ${formatQty(s.notSeparated)}개</div>` : ''}
-                ${s.separated > 0 ? `<div style="font-size:11px;color:#2d7a3a">분리O: ${formatQty(s.separated)}개</div>` : ''}
-                ${s.noSplit > 0 ? `<div style="font-size:11px;color:#2d4a8a">소분X: ${formatQty(s.noSplit)}개</div>` : ''}
-              </div>
-            `).join('')}
-        </div>
+      <!-- 뷰 전환 탭 -->
+      <div style="display:flex;gap:0;border-bottom:2px solid #e8e8e8;margin-bottom:16px;">
+        <button class="sep-view-tab" data-view="daily"
+          style="padding:10px 20px;background:${sepViewMode === 'daily' ? '#fff' : '#f5f5f5'};border:1px solid #e8e8e8;border-bottom:${sepViewMode === 'daily' ? '2px solid white' : 'none'};margin-bottom:-2px;font-size:14px;cursor:pointer;font-weight:${sepViewMode === 'daily' ? '600' : '400'};color:${sepViewMode === 'daily' ? '#1a1a1a' : '#888'};">
+          일별 현황
+        </button>
+        <button class="sep-view-tab" data-view="product"
+          style="padding:10px 20px;background:${sepViewMode === 'product' ? '#fff' : '#f5f5f5'};border:1px solid #e8e8e8;border-bottom:${sepViewMode === 'product' ? '2px solid white' : 'none'};margin-bottom:-2px;font-size:14px;cursor:pointer;font-weight:${sepViewMode === 'product' ? '600' : '400'};color:${sepViewMode === 'product' ? '#1a1a1a' : '#888'};">
+          제품별 이력
+        </button>
       </div>
 
-      <!-- 테이블 -->
-      <div class="table-wrap" style="background:white;border-radius:8px;border:1px solid #e8e8e8;overflow:hidden;">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>날짜</th>
-              <th>제품명</th>
-              <th>재고 종류</th>
-              <th>수량</th>
-              <th>담당자</th>
-              <th>비고</th>
-              ${canDelete ? '<th>작업</th>' : ''}
-            </tr>
-          </thead>
-          <tbody>
-            ${stocks.length === 0 ?
-              `<tr><td colspan="${canDelete ? 7 : 6}" style="text-align:center;color:#aaa;padding:20px;">등록된 재고 없음</td></tr>` :
-              stocks.map(s => `
-                <tr>
-                  <td>${s.date}</td>
-                  <td>${s.productName}</td>
-                  <td>
-                    <span class="tag ${getStockTypeTagClass(s.stockType)}">
-                      ${getStockTypeLabel(s.stockType)}
-                    </span>
-                  </td>
-                  <td style="font-weight:600">${formatQty(s.remaining)}개</td>
-                  <td>${s.staffName || '-'}</td>
-                  <td>${s.note || '-'}</td>
-                  ${canDelete ? `
-                    <td>
-                      <button class="btn-del-row btnDeleteFrozenSep" data-id="${s.id}">삭제</button>
-                    </td>
-                  ` : ''}
-                </tr>
-              `).join('')}
-          </tbody>
-        </table>
-      </div>
+      ${sepViewMode === 'daily'
+        ? renderDailyMatrix(stocks, logs, productNames)
+        : `<div style="display:flex;flex-direction:column;gap:12px;">
+            ${productNames.length === 0
+              ? '<div style="background:white;border-radius:12px;border:1px solid #e8e8e8;padding:32px;text-align:center;color:#aaa;font-size:13px;">등록된 재고/이력 없음</div>'
+              : productNames.map(name => renderProductCard(name, stocks, logs, balances, canDelete)).join('')}
+          </div>`}
     </div>
   `;
 
@@ -147,12 +251,255 @@ function renderFrozenSepLayout(stocks) {
   document.getElementById('btnSeparate').addEventListener('click', () => showSeparateModal(stocks));
   document.getElementById('btnOut').addEventListener('click', () => showOutModal(stocks));
   document.getElementById('btnAdjust').addEventListener('click', () => showAdjustModal(stocks));
-  document.querySelectorAll('.btnDeleteFrozenSep').forEach(btn => {
+
+  // 제품 열 드래그 정렬 (admin/office만)
+  const headRow = document.getElementById('sepMatrixHeadRow');
+  if (headRow && canDelete) {
+    new Sortable(headRow, {
+      animation: 150,
+      draggable: '.sep-col-th',
+      direction: 'horizontal',
+      onEnd: async () => {
+        const newOrder = [...headRow.querySelectorAll('.sep-col-th')].map(th => th.dataset.product);
+        sepProductOrder = newOrder;
+        try {
+          await setDoc(doc(db, 'settings', 'frozenSepProductOrder'), {
+            order: newOrder, updatedAt: new Date(),
+          });
+        } catch (err) {
+          console.error('saveSepProductOrder:', err);
+          alert('순서 저장 실패: ' + err.message);
+        }
+        renderFrozenSepLayout(stocks, logs);
+      },
+    });
+  }
+
+  // 뷰 전환
+  document.querySelectorAll('.sep-view-tab').forEach(btn => {
     btn.addEventListener('click', () => {
+      sepViewMode = btn.dataset.view;
+      renderFrozenSepLayout(stocks, logs);
+    });
+  });
+
+  // 카드 펼침/접힘
+  document.querySelectorAll('.sep-card-header').forEach(header => {
+    header.addEventListener('click', () => {
+      const name = header.dataset.product;
+      if (expandedSepProducts.has(name)) expandedSepProducts.delete(name);
+      else expandedSepProducts.add(name);
+      renderFrozenSepLayout(stocks, logs);
+    });
+  });
+
+  document.querySelectorAll('.btnDeleteFrozenSep').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
       const stock = stocks.find(s => s.id === btn.dataset.id);
       if (stock) deleteFrozenSepStock(stock);
     });
   });
+}
+
+// 일별 현황 매트릭스 — 행: 날짜, 열: 제품 × 재고종류, 셀: 그날 마감 잔량
+function renderDailyMatrix(stocks, logs, productNames) {
+  if (productNames.length === 0) {
+    return '<div style="background:white;border-radius:12px;border:1px solid #e8e8e8;padding:32px;text-align:center;color:#aaa;font-size:13px;">등록된 재고/이력 없음</div>';
+  }
+
+  const { dates, snapshots, staffByDate } = computeDailySnapshots(stocks, logs);
+
+  // 제품별로 등장하는 재고 종류 수집 (분리O → 분리X → 소분X 순)
+  const TYPE_ORDER = ['separated', 'notSeparated', 'noSplit'];
+  const productTypes = {};
+  productNames.forEach(p => { productTypes[p] = new Set(); });
+  stocks.forEach(s => productTypes[s.productName]?.add(s.stockType));
+  logs.forEach(l => {
+    getLogEffects(l).forEach(e => {
+      if (e.stockType) productTypes[l.productName]?.add(e.stockType);
+    });
+  });
+  const columns = []; // [{product, stockType}]
+  productNames.forEach(p => {
+    const types = TYPE_ORDER.filter(t => productTypes[p].has(t));
+    (types.length ? types : ['notSeparated']).forEach(t => columns.push({ product: p, stockType: t }));
+  });
+
+  // 제품 헤더 색상 (연한 파스텔 순환)
+  const PRODUCT_HEADER_BG = ['#fdf3e0', '#e8f0fc', '#e8f5ea', '#f3ecfa', '#fbeaea', '#e9f6f4'];
+
+  const canDrag = canDeleteFrozenSepStock();
+  const productHeaderCells = productNames.map((p, i) => {
+    const span = TYPE_ORDER.filter(t => productTypes[p].has(t)).length || 1;
+    return `<th colspan="${span}" class="sep-col-th" data-product="${p}" style="background:${PRODUCT_HEADER_BG[i % PRODUCT_HEADER_BG.length]};font-size:12px;padding:8px 6px;border:1px solid #e0e0e0;text-align:center;min-width:${span * 58}px;${canDrag ? 'cursor:grab;' : ''}" ${canDrag ? 'title="드래그로 순서 변경"' : ''}>${p}</th>`;
+  }).join('');
+
+  const typeHeaderCells = columns.map(c => {
+    const style = STOCK_TYPE_STYLE[c.stockType] || STOCK_TYPE_STYLE.notSeparated;
+    return `<th style="background:${style.bg};color:${style.text};font-size:11px;padding:5px 4px;border:1px solid #e0e0e0;text-align:center;">${getStockTypeLabel(c.stockType)}</th>`;
+  }).join('');
+
+  const bodyRows = dates.map(d => {
+    const snap = snapshots[d] || {};
+    const cells = columns.map(c => {
+      const v = snap[`${c.product}|${c.stockType}`] || 0;
+      return `<td style="border:1px solid #eee;text-align:center;padding:8px 4px;font-size:12.5px;${v > QTY_EPSILON ? 'font-weight:600;color:#333;' : 'color:#ddd;'}">${v > QTY_EPSILON ? formatQty(v) : ''}</td>`;
+    }).join('');
+    return `
+      <tr>
+        <td style="border:1px solid #eee;text-align:center;padding:8px 6px;font-size:12px;font-weight:600;color:#555;white-space:nowrap;">${d.slice(5).replace('-', '/')}</td>
+        <td style="border:1px solid #eee;text-align:center;padding:8px 6px;font-size:12px;color:#888;white-space:nowrap;">${staffByDate[d] || '-'}</td>
+        ${cells}
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <div style="background:white;border-radius:12px;border:1px solid #e8e8e8;overflow-x:auto;">
+      <table style="border-collapse:collapse;width:100%;">
+        <thead>
+          <tr id="sepMatrixHeadRow">
+            <th rowspan="2" style="background:#fbfaf5;font-size:12px;padding:8px;border:1px solid #e0e0e0;min-width:56px;">날짜</th>
+            <th rowspan="2" style="background:#fbfaf5;font-size:12px;padding:8px;border:1px solid #e0e0e0;min-width:80px;">작업 담당자</th>
+            ${productHeaderCells}
+          </tr>
+          <tr>${typeHeaderCells}</tr>
+        </thead>
+        <tbody>${bodyRows}</tbody>
+      </table>
+    </div>
+    <p style="font-size:11px;color:#aaa;margin-top:8px;">각 칸은 해당 날짜 마감 시점의 잔량입니다. 현재 재고에서 작업 이력을 역산해 계산됩니다.</p>
+  `;
+}
+
+function renderProductCard(name, stocks, logs, balances, canDelete) {
+  const expanded = expandedSepProducts.has(name);
+  const myStocks = stocks.filter(s => s.productName === name);
+  const myLogs = logs.filter(l => l.productName === name);
+
+  // 현재 잔량 (재고종류별)
+  const current = {};
+  myStocks.forEach(s => {
+    current[s.stockType] = normalizeQty((current[s.stockType] || 0) + Number(s.remaining || 0));
+  });
+
+  // 누적 합계
+  let cumIn = 0, cumSep = 0, cumOut = 0, cumAdjust = 0;
+  myLogs.forEach(l => {
+    const q = Number(l.qty || 0);
+    if (l.type === 'incoming') cumIn += q;
+    else if (l.type === 'separate') cumSep += q;
+    else if (l.type === 'out') cumOut += q;
+    else if (l.type === 'adjust' || l.type === 'delete') cumAdjust += q;
+  });
+
+  const cumParts = [`누적 입고 <b style="font-weight:600;color:#333;">${formatQty(cumIn)}개</b>`];
+  if (cumSep > 0) cumParts.push(`분리 완료 <b style="font-weight:600;color:#333;">${formatQty(cumSep)}개</b>`);
+  cumParts.push(`출고 <b style="font-weight:600;color:#333;">${formatQty(cumOut)}개</b>`);
+  if (Math.abs(cumAdjust) > QTY_EPSILON) cumParts.push(`조정 <b style="font-weight:600;color:#333;">${cumAdjust > 0 ? '+' : ''}${formatQty(cumAdjust)}개</b>`);
+
+  const badges = Object.entries(current)
+    .filter(([, v]) => v > QTY_EPSILON)
+    .map(([st, v]) => {
+      const style = STOCK_TYPE_STYLE[st] || STOCK_TYPE_STYLE.notSeparated;
+      return `<span style="background:${style.bg};color:${style.text};font-size:11px;padding:3px 10px;border-radius:10px;white-space:nowrap;">${getStockTypeLabel(st)} ${formatQty(v)}</span>`;
+    }).join('');
+
+  // 진행률 바 (현재 잔량 구성비)
+  const totalCurrent = Object.values(current).reduce((s, v) => s + v, 0);
+  const barSegments = totalCurrent > QTY_EPSILON
+    ? Object.entries(current)
+        .filter(([, v]) => v > QTY_EPSILON)
+        .map(([st, v]) => {
+          const style = STOCK_TYPE_STYLE[st] || STOCK_TYPE_STYLE.notSeparated;
+          const pct = (v / totalCurrent) * 100;
+          return { st, pct, color: style.bar };
+        })
+    : [];
+
+  const barHtml = barSegments.length > 0 ? `
+    <div style="padding:0 18px 8px;">
+      <div style="display:flex;height:8px;border-radius:4px;overflow:hidden;background:#f5f5f5;">
+        ${barSegments.map(seg => `<div style="width:${seg.pct}%;background:${seg.color};"></div>`).join('')}
+      </div>
+      <div style="display:flex;gap:14px;margin-top:5px;font-size:11px;color:#999;">
+        ${barSegments.map(seg => `<span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${seg.color};margin-right:4px;"></span>${getStockTypeLabel(seg.st)} ${Math.round(seg.pct)}%</span>`).join('')}
+      </div>
+    </div>
+  ` : '';
+
+  // 통장식 이력 (이전 → 이후)
+  const ledgerRows = myLogs.map(log => {
+    const qty = Number(log.qty || 0);
+    const after = balances[log.id] || {};
+    const effects = getLogEffects(log);
+
+    let desc = '';
+    if (log.type === 'incoming') desc = `${getStockTypeLabel(log.toStockType)} +${formatQty(qty)}개`;
+    else if (log.type === 'separate') desc = `분리X → 분리O ${formatQty(qty)}개`;
+    else if (log.type === 'out') desc = `${getStockTypeLabel(log.fromStockType)} -${formatQty(qty)}개`;
+    else if (log.type === 'adjust') desc = `${getStockTypeLabel(log.fromStockType)} ${qty >= 0 ? '+' : ''}${formatQty(qty)}개`;
+    else if (log.type === 'delete') desc = `${getStockTypeLabel(log.fromStockType)} ${formatQty(qty)}개`;
+
+    const flowText = effects
+      .filter(e => e.stockType && after[e.stockType] !== undefined)
+      .map(e => {
+        const afterV = after[e.stockType];
+        const beforeV = normalizeQty(afterV - e.delta);
+        return `${getStockTypeLabel(e.stockType)} ${formatQty(beforeV)} → <b style="font-weight:600;color:#333;">${formatQty(afterV)}</b>`;
+      }).join(' · ') || '-';
+
+    return `
+      <tr style="border-top:1px solid #f0f0f0;">
+        <td style="padding:7px 0;color:#999;font-size:12px;width:76px;">${(log.date || '').slice(5) || '-'}</td>
+        <td style="width:48px;"><span style="color:${getLogTypeColor(log.type)};font-weight:600;font-size:12px;">${getLogTypeLabel(log.type)}</span></td>
+        <td style="font-size:12.5px;">${desc}</td>
+        <td style="text-align:right;color:#888;font-size:12px;">${flowText}</td>
+        <td style="text-align:right;color:#999;font-size:12px;width:64px;">${log.staffName || '-'}</td>
+      </tr>
+    `;
+  }).join('');
+
+  // 현재 lot 상세 (삭제 버튼 포함)
+  const lotRows = myStocks.map(s => `
+    <tr style="border-top:1px solid #f0f0f0;">
+      <td style="padding:6px 0;color:#999;font-size:12px;width:90px;">${s.date}</td>
+      <td style="width:60px;"><span class="tag ${getStockTypeTagClass(s.stockType)}" style="font-size:10px;">${getStockTypeLabel(s.stockType)}</span></td>
+      <td style="font-size:12.5px;font-weight:600;">${formatQty(s.remaining)}개 <span style="font-weight:400;font-size:11px;color:#999;">/ 최초 ${formatQty(s.initialQty)}개</span></td>
+      <td style="color:#999;font-size:12px;">${s.staffName || '-'}</td>
+      <td style="color:#999;font-size:12px;">${s.note || '-'}</td>
+      ${canDelete ? `<td style="text-align:right;width:52px;"><button class="btn-del-row btnDeleteFrozenSep" data-id="${s.id}">삭제</button></td>` : ''}
+    </tr>
+  `).join('');
+
+  return `
+    <div style="background:white;border:1px solid #e8e8e8;border-radius:12px;overflow:hidden;">
+      <div class="sep-card-header" data-product="${name}" style="padding:14px 18px;display:flex;align-items:center;gap:14px;cursor:pointer;user-select:none;">
+        <span style="font-size:13px;color:#bbb;transform:rotate(${expanded ? '90deg' : '0deg'});transition:transform 0.15s;">▶</span>
+        <span style="font-size:15px;font-weight:600;min-width:150px;">${name}</span>
+        <span style="font-size:12px;color:#888;">${cumParts.join(' · ')}</span>
+        <span style="margin-left:auto;display:flex;gap:6px;">${badges || '<span style="font-size:11px;color:#ccc;">재고 없음</span>'}</span>
+      </div>
+      ${expanded ? `
+        ${barHtml}
+        <div style="border-top:1px solid #f0f0f0;padding:10px 18px 14px;">
+          <div style="font-size:12px;font-weight:600;color:#888;margin-bottom:4px;">작업 이력</div>
+          <table style="width:100%;font-size:12.5px;border-collapse:collapse;">
+            ${ledgerRows || '<tr><td style="padding:8px 0;color:#ccc;font-size:12px;">이력 없음</td></tr>'}
+          </table>
+        </div>
+        ${myStocks.length > 0 ? `
+          <div style="border-top:1px solid #f0f0f0;padding:10px 18px 14px;background:#fafafa;">
+            <div style="font-size:12px;font-weight:600;color:#888;margin-bottom:4px;">현재 lot</div>
+            <table style="width:100%;font-size:12.5px;border-collapse:collapse;">
+              ${lotRows}
+            </table>
+          </div>
+        ` : ''}
+      ` : ''}
+    </div>
+  `;
 }
 
 async function deleteFrozenSepStock(stock) {
@@ -230,8 +577,8 @@ async function deleteFrozenSepStock(stock) {
     },
   });
 
-  const newStocks = await loadFrozenSepStocks();
-  renderFrozenSepLayout(newStocks);
+  const [newStocks, newLogs] = await Promise.all([loadFrozenSepStocks(), loadFrozenSepLogs()]);
+  renderFrozenSepLayout(newStocks, newLogs);
   alert('삭제 완료!');
 }
 
@@ -351,8 +698,8 @@ function showIncomingModal(stocks) {
     });
 
     closeModal();
-    const newStocks = await loadFrozenSepStocks();
-    renderFrozenSepLayout(newStocks);
+    const [newStocks, newLogs] = await Promise.all([loadFrozenSepStocks(), loadFrozenSepLogs()]);
+    renderFrozenSepLayout(newStocks, newLogs);
     alert('입고 완료!');
   });
 }
@@ -462,8 +809,8 @@ function showSeparateModal(stocks) {
     });
 
     closeModal();
-    const newStocks = await loadFrozenSepStocks();
-    renderFrozenSepLayout(newStocks);
+    const [newStocks, newLogs] = await Promise.all([loadFrozenSepStocks(), loadFrozenSepLogs()]);
+    renderFrozenSepLayout(newStocks, newLogs);
     alert('분리 작업 완료!');
   });
 }
@@ -610,8 +957,8 @@ function showOutModal(stocks) {
     });
 
     closeModal();
-    const newStocks = await loadFrozenSepStocks();
-    renderFrozenSepLayout(newStocks);
+    const [newStocks, newLogs] = await Promise.all([loadFrozenSepStocks(), loadFrozenSepLogs()]);
+    renderFrozenSepLayout(newStocks, newLogs);
     alert('출고 완료!');
   });
 }
@@ -736,8 +1083,8 @@ function showAdjustModal(stocks) {
     });
 
     closeModal();
-    const newStocks = await loadFrozenSepStocks();
-    renderFrozenSepLayout(newStocks);
+    const [newStocks, newLogs] = await Promise.all([loadFrozenSepStocks(), loadFrozenSepLogs()]);
+    renderFrozenSepLayout(newStocks, newLogs);
     alert('조정 완료!');
   });
 }

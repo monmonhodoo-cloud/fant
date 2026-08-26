@@ -122,9 +122,15 @@ function renderScheduleLayout(schedules) {
 
   document.querySelectorAll('.btn-complete').forEach(btn => {
     btn.addEventListener('click', async () => {
-      const id = btn.dataset.id;
-      const s = schedules.find(sc => sc.id === id);
-      if (s) showCompleteModal(s);
+      try {
+        const id = btn.dataset.id;
+        const s = schedules.find(sc => sc.id === id);
+        if (!s) { alert('일정을 찾을 수 없습니다. 새로고침 후 다시 시도해주세요.'); return; }
+        showCompleteModal(s);
+      } catch (err) {
+        console.error('완료 버튼 오류:', err);
+        alert('오류가 발생했습니다: ' + err.message);
+      }
     });
   });
 
@@ -595,7 +601,7 @@ function showCompleteModal(s) {
       <label>입고 담당자 *</label>
       <select id="m_staff">
         <option value="">선택</option>
-        ${getStaffOptions(['lead'])}
+        ${getStaffOptions(s.type === 'egg' ? ['senior'] : ['lead'])}
       </select>
     </div>
     <div class="form-group">
@@ -609,6 +615,7 @@ function showCompleteModal(s) {
   `);
 
   document.getElementById('btnSaveComplete').addEventListener('click', async () => {
+    try {
     const actual = parseFloat(document.getElementById('m_actual').value);
     const actualUnit = document.getElementById('m_actual_unit')?.value || s.orderedUnit;
     const staff = document.getElementById('m_staff').value;
@@ -813,6 +820,10 @@ function showCompleteModal(s) {
     const newSchedules = await loadSchedules();
     renderScheduleLayout(newSchedules);
     alert('완료 처리되었습니다!');
+    } catch (err) {
+      console.error('입고 완료 처리 오류:', err);
+      alert(`완료 처리 중 오류가 발생했습니다.\n\n${err.code || ''} ${err.message}\n\n이 메시지를 관리자에게 전달해주세요.`);
+    }
   });
 }
 

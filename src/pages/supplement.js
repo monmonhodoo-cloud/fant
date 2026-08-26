@@ -3,6 +3,7 @@ import {
   collection, doc, getDoc, getDocs, limit, orderBy, query, where, runTransaction,
   serverTimestamp,
 } from 'firebase/firestore';
+import * as XLSX from 'xlsx';
 import { currentUser, currentUserRole } from '../app.js';
 import { getTodayKST } from '../utils/date.js';
 import { loadMenuStaffGroups, STAFF_GROUP_LABELS } from '../services/menuStaffGroups.js';
@@ -101,6 +102,7 @@ function renderSupplementLayout() {
             <option value="warning" ${supplementFilter === 'warning' ? 'selected' : ''}>${supplementThresholdYellow}봉 미만만</option>
             <option value="danger" ${supplementFilter === 'danger' ? 'selected' : ''}>${supplementThresholdRed}봉 미만만</option>
           </select>
+          <button class="btn-secondary" id="btnSupplementExcel">엑셀 다운로드</button>
           <button class="btn-secondary" id="btnSupplementAllLogs">전체보기</button>
           <button class="btn-secondary" id="btnSupplementRefresh">새로고침</button>
         </div>
@@ -132,6 +134,38 @@ function getFilteredSupplementTypes() {
     if (supplementFilter === 'danger') return qty < supplementThresholdRed;
     return true;
   });
+}
+
+function downloadSupplementStockExcel() {
+  const filtered = getFilteredSupplementTypes();
+  if (filtered.length === 0) {
+    alert('다운로드할 영양제 SKU가 없습니다.');
+    return;
+  }
+
+  const rows = [['영양제 SKU', '재고', '영양제 SKU', '재고']];
+  for (let i = 0; i < filtered.length; i += 2) {
+    const left = filtered[i];
+    const right = filtered[i + 1];
+    rows.push([
+      left?.name || left?.id || '',
+      left ? `${getStockQty(left.id)}봉` : '',
+      right?.name || right?.id || '',
+      right ? `${getStockQty(right.id)}봉` : '',
+    ]);
+  }
+
+  const worksheet = XLSX.utils.aoa_to_sheet(rows);
+  worksheet['!cols'] = [
+    { wch: 34 },
+    { wch: 10 },
+    { wch: 34 },
+    { wch: 10 },
+  ];
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, '영양제재고');
+  XLSX.writeFile(workbook, `영양제재고_${getTodayKST().replaceAll('-', '')}.xlsx`);
 }
 
 function getSupplementUnit(type) {
@@ -485,6 +519,7 @@ function bindSupplementEvents() {
     bindSupplementCellEvents();
   });
   document.getElementById('btnSupplementAllLogs')?.addEventListener('click', showAllSupplementLogsModal);
+  document.getElementById('btnSupplementExcel')?.addEventListener('click', downloadSupplementStockExcel);
 
   document.getElementById('supplementInStaff')?.addEventListener('change', (e) => {
     selectedInStaff = e.target.value;

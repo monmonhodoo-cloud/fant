@@ -2,21 +2,49 @@ import { formatIngredientQtyValue } from './number.js';
 
 export const CHICKEN_ORDER_NAMES = ['닭가슴살', '닭정육', '통닭', '닭목뼈', '닭안심'];
 
-export function buildChickenOrderText(productionsArr = []) {
+export function buildChickenOrderText(productionsArr = [], recipesArr = []) {
   const totals = new Map();
 
   productionsArr.forEach(production => {
-    (production.ingredientsSnapshot || []).forEach(ing => {
+    // 오른쪽 패널과 동일한 실시간 계산 (snapshot.requiredQtyG는 레시피 변경 전 저장 시 틀릴 수 있음)
+    const recipe = recipesArr.find(r => r.id === production.recipeId);
+    const ingredients = recipe ? (recipe.ingredients || []) : (production.ingredientsSnapshot || []);
+    // snapshot 우선 (신규), recipe fallback (구형 snapshot에 isProductionUnit 없음)
+    const productionUnitIng =
+      (production.ingredientsSnapshot || []).find(i => i.isProductionUnit) ||
+      recipe?.ingredients?.find(i => i.isProductionUnit);
+    const qty = Number(production.productionUnitQty) || 0;
+    const puUnitName = (productionUnitIng?.unitName || '').trim().toLowerCase();
+    const puIsCountUnit = puUnitName !== '' && puUnitName !== 'kg' && puUnitName !== 'g';
+    const puGramsPerQty = puIsCountUnit
+      ? (Number(productionUnitIng?.baseWeightG) || 0)
+      : (productionUnitIng?.weightDisplayUnit === 'kg' ? 1000 : 1);
+    const productionTotalG = qty * puGramsPerQty;
+    const puBaseWeightForRatio = Number(productionUnitIng?.baseWeightG) || 1;
+
+    ingredients.forEach(ing => {
       const name = (ing.name || '').trim();
       if (!name) return;
-      totals.set(name, (totals.get(name) || 0) + Number(ing.requiredQtyG || 0));
+      const ratio = (Number(ing.baseWeightG) || 0) / puBaseWeightForRatio;
+      const ingTotalG = recipe ? ratio * productionTotalG : Number(ing.requiredQtyG || 0);
+      const current = totals.get(name);
+      totals.set(name, {
+        totalG: (current?.totalG || 0) + ingTotalG,
+        unitName: current?.unitName || (ing.unitName || ''),
+        baseWeightG: current?.baseWeightG || (Number(ing.baseWeightG) || 0),
+      });
     });
   });
 
   const parts = CHICKEN_ORDER_NAMES
     .map(name => {
-      const totalG = totals.get(name) || 0;
+      const { totalG = 0, unitName = '', baseWeightG = 0 } = totals.get(name) || {};
       if (totalG <= 0) return '';
+      const isCountUnit = unitName && unitName !== 'kg' && unitName !== 'g';
+      if (isCountUnit && baseWeightG > 0) {
+        const count = Math.ceil(totalG / baseWeightG);
+        return `${name} ${count}${unitName}`;
+      }
       return `${name} ${formatIngredientQtyValue(totalG, 'kg')}kg`;
     })
     .filter(Boolean);

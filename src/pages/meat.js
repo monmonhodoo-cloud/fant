@@ -1,6 +1,6 @@
 import { db } from '../firebase.js';
 import {
-  collection, getDocs, doc, addDoc, updateDoc, query, orderBy, getDoc, where, writeBatch
+  collection, getDocs, doc, addDoc, updateDoc, query, orderBy, getDoc, where, writeBatch, setDoc
 } from 'firebase/firestore';
 import { blockIfClosed } from '../utils/closingGuard.js';
 import { currentUserRole } from '../app.js';
@@ -10,18 +10,22 @@ import { getTodayKST as getToday } from '../utils/date.js';
 import Sortable from 'sortablejs';
 
 let meatTypes = [];
+let meatStockCategories = [];
 let currentTab = 'frozen';
 let meatTypesSortable = null;
-let stockSummarySortable = null;
-
-const STOCK_SUMMARY_ORDER_KEY = 'meatStockSummaryOrder';
-const STOCK_SUMMARY_ROW_BREAKS_KEY = 'meatStockSummaryRowBreaks';
+let stockSummarySortables = [];
+let stockSummaryCategorySortable = null;
+let collapsedStockSummaryIds = new Set();
+let expandedMeatLogTypeIds = new Set();
 
 export async function renderMeat() {
   const content = document.getElementById('mainContent');
   content.innerHTML = `<div style="padding:24px;"><p>원료 재고 로딩 중...</p></div>`;
   await loadStaffCache();
-  meatTypes = await loadMeatTypes();
+  [meatTypes, meatStockCategories] = await Promise.all([
+    loadMeatTypes(),
+    loadMeatStockCategories(),
+  ]);
   renderMeatLayout();
 }
 
@@ -29,6 +33,42 @@ async function loadMeatTypes() {
   const q = query(collection(db, 'meatTypes'), orderBy('sortOrder'));
   const snap = await getDocs(q);
   return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+
+function normalizeMeatStockCategories(groups) {
+  return (Array.isArray(groups) ? groups : [])
+    .map((g, idx) => ({
+      id: String(g?.id || '').trim(),
+      name: String(g?.name || '').trim(),
+      sortOrder: Number.isFinite(Number(g?.sortOrder)) ? Number(g.sortOrder) : idx,
+      scope: g?.scope === 'produce' ? 'produce' : 'meat',
+    }))
+    .filter(g => g.id && g.name)
+    .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name, 'ko'));
+}
+
+async function loadMeatStockCategories() {
+  const snap = await getDoc(doc(db, 'settings', 'meatStockCategories'));
+  if (!snap.exists()) return [];
+  return normalizeMeatStockCategories(snap.data().groups);
+}
+
+async function saveMeatStockCategories(groups) {
+  const normalized = normalizeMeatStockCategories(groups)
+    .map((g, idx) => ({ ...g, sortOrder: idx }));
+  await setDoc(doc(db, 'settings', 'meatStockCategories'), {
+    groups: normalized,
+    updatedAt: new Date(),
+  }, { merge: true });
+  meatStockCategories = normalized;
+}
+
+function getCurrentStockCategoryScope() {
+  return currentTab === 'produce' ? 'produce' : 'meat';
+}
+
+function getScopedMeatStockCategories(scope = getCurrentStockCategoryScope()) {
+  return meatStockCategories.filter(g => (g.scope || 'meat') === scope);
 }
 
 function getActiveMeatTypes() {
@@ -124,8 +164,17 @@ function buildTotalByType(stocks) {
   (stocks || []).forEach(s => {
     const key = s.meatTypeId || s.meatNameSnapshot || s.id;
     const cur = map.get(key);
-    if (cur) cur.totalG += Number(s.remaining || 0);
-    else map.set(key, { name: s.meatNameSnapshot || '원료', totalG: Number(s.remaining || 0), meatTypeId: s.meatTypeId });
+    if (cur) {
+      cur.totalG += Number(s.remaining || 0);
+      cur.lots.push(s);
+    } else {
+      map.set(key, {
+        name: s.meatNameSnapshot || '원료',
+        totalG: Number(s.remaining || 0),
+        meatTypeId: s.meatTypeId,
+        lots: [s],
+      });
+    }
   });
   return map;
 }
@@ -148,7 +197,7 @@ function getStockSummaryRowBreaks() {
   }
 }
 
-function renderStockSummary(stocks) {
+function legacyRenderStockSummary(stocks) {
   const byType = buildTotalByType(stocks);
   if (byType.size === 0) return '';
 
@@ -231,7 +280,7 @@ function toggleStockSummaryRowBreak(cellEl, gridEl) {
   saveStockSummaryRowBreaksFromGrid(gridEl);
 }
 
-function initStockSummarySortable() {
+function legacyInitStockSummarySortable() {
   if (stockSummarySortable) {
     try {
       stockSummarySortable.destroy();
@@ -259,6 +308,457 @@ function initStockSummarySortable() {
       toggleStockSummaryRowBreak(cell, gridEl);
       btn.style.color = cell.dataset.rowBreak === 'true' ? '#4a7c59' : '#ccc';
     });
+  });
+}
+
+function escapeHtml(value = '') {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function createMeatStockCategoryId() {
+  return `cat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getMeatTypeGroupId(meatTypeId) {
+  return meatTypes.find(m => m.id === meatTypeId)?.groupId || null;
+}
+
+function getMeatTypeGroupSortOrder(meatTypeId) {
+  const value = meatTypes.find(m => m.id === meatTypeId)?.groupSortOrder;
+  return Number.isFinite(Number(value)) ? Number(value) : Number.MAX_SAFE_INTEGER;
+}
+
+function buildStockSummaryGroups(byType) {
+  const groups = getScopedMeatStockCategories().map(g => ({ ...g, items: [], virtual: false }));
+  const groupMap = new Map(groups.map(g => [g.id, g]));
+  const otherGroup = { id: '__other__', name: '기타', sortOrder: Number.MAX_SAFE_INTEGER, items: [], virtual: true };
+
+  [...byType.values()].forEach(item => {
+    const groupId = item.meatTypeId ? getMeatTypeGroupId(item.meatTypeId) : null;
+    const group = groupId && groupMap.has(groupId) ? groupMap.get(groupId) : otherGroup;
+    group.items.push(item);
+  });
+
+  [...groups, otherGroup].forEach(group => {
+    group.items.sort((a, b) => {
+      const aOrder = getMeatTypeGroupSortOrder(a.meatTypeId);
+      const bOrder = getMeatTypeGroupSortOrder(b.meatTypeId);
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      return (a.name || '').localeCompare(b.name || '', 'ko');
+    });
+  });
+
+  return otherGroup.items.length > 0 ? [...groups, otherGroup] : groups;
+}
+
+function renderStockSummaryCell(g) {
+  const color = getStockColor(g.totalG, g.meatTypeId);
+  const canDrag = currentUserRole === 'admin' || currentUserRole === 'office';
+  const summaryId = g.meatTypeId || g.name;
+  const expanded = !collapsedStockSummaryIds.has(summaryId);
+  const lots = [...(g.lots || [])].sort((a, b) => {
+    const dateA = String(a.incomingDate || a.processedDate || a.repackedDate || '');
+    const dateB = String(b.incomingDate || b.processedDate || b.repackedDate || '');
+    return dateA.localeCompare(dateB);
+  });
+  return `
+    <div class="stock-summary-cell" data-meat-type-id="${g.meatTypeId || ''}" data-summary-id="${escapeHtml(summaryId)}" style="min-width:0;border:1px solid #e8e8e8;border-radius:5px;padding:0;background:#fff;overflow:hidden;">
+      <div class="stock-summary-main" style="display:flex;align-items:center;gap:4px;min-width:0;padding:3px 5px;cursor:pointer;">
+        ${canDrag ? '<span class="stock-summary-drag-handle" style="cursor:grab;color:#bbb;font-size:11px;flex-shrink:0;">::</span>' : ''}
+        <span style="color:#888;font-size:11px;flex-shrink:0;width:10px;text-align:center;">${expanded ? '-' : '+'}</span>
+        <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#444;font-size:12px;flex:1;">${escapeHtml(g.name)}</span>
+        <b style="color:${color};font-variant-numeric:tabular-nums;font-size:12px;white-space:nowrap;">${(g.totalG / 1000).toFixed(2)}kg</b>
+      </div>
+      ${expanded ? `
+        <div class="stock-summary-lots" style="border-top:1px solid #eee;background:#fafafa;padding:4px 5px;display:flex;flex-direction:column;gap:3px;">
+          ${lots.map(lot => {
+            const date = lot.incomingDate || lot.processedDate || lot.repackedDate || '-';
+            const lotColor = lot.remaining < 0 ? '#e53e3e' : '#333';
+            return `
+              <div style="border:1px solid #ececec;border-radius:4px;background:#fff;padding:4px;">
+                <div style="display:flex;align-items:center;gap:5px;">
+                  <span style="color:#777;font-size:11px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(date)}</span>
+                  <b style="color:${lotColor};font-size:11px;white-space:nowrap;">${(Number(lot.remaining || 0) / 1000).toFixed(2)}kg</b>
+                  <button class="btn-adjust" data-id="${lot.id}" data-name="${escapeHtml(lot.meatNameSnapshot || g.name || '')}" data-remaining="${lot.remaining}" style="padding:1px 6px;font-size:11px;">&#51312;&#51221;</button>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+function renderStockSummary(stocks) {
+  const byType = buildTotalByType(stocks);
+  const groups = buildStockSummaryGroups(byType);
+  const canManage = currentUserRole === 'admin' || currentUserRole === 'office';
+
+  return `
+    <div class="stock-summary-wrap" style="background:#f8f9fa;border:1px solid #e8e8e8;border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:13px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
+        <div style="color:#666;font-weight:600;">원료별 합계</div>
+        ${canManage ? '<button type="button" class="btn-secondary" id="btnMeatStockCategories" style="padding:4px 8px;font-size:12px;">카테고리 관리</button>' : ''}
+      </div>
+      <div class="stock-summary-columns" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start;">
+        ${groups.map(group => `
+          <div class="stock-summary-category-column" data-category-id="${group.id}" data-virtual="${group.virtual ? 'true' : 'false'}"
+               style="flex:0 0 calc((100% - 50px) / 6);flex-grow:0;flex-shrink:0;min-width:0;max-width:calc((100% - 50px) / 6);background:#fff;border:1px solid #e8e8e8;border-radius:6px;overflow:hidden;">
+            <div class="stock-summary-category-header" style="display:flex;align-items:center;gap:6px;padding:5px 7px;background:#f1f3f5;border-bottom:1px solid #e8e8e8;font-weight:700;color:#444;font-size:12px;">
+              ${canManage && !group.virtual ? '<span class="stock-summary-category-handle" style="cursor:grab;color:#aaa;">⠿</span>' : ''}
+              <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${escapeHtml(group.name)}</span>
+              <span style="font-size:11px;color:#888;">${group.items.length}</span>
+            </div>
+            <div class="stock-summary-category-items" data-category-id="${group.id}" style="display:flex;flex-direction:column;gap:4px;min-height:28px;padding:5px;">
+              ${group.items.length === 0
+                ? '<div class="stock-summary-empty" style="font-size:11px;color:#bbb;padding:3px 2px;">비어 있음</div>'
+                : group.items.map(renderStockSummaryCell).join('')}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function buildStockLotGroups(stocks) {
+  const groups = getScopedMeatStockCategories().map(g => ({ ...g, items: [], virtual: false }));
+  const groupMap = new Map(groups.map(g => [g.id, g]));
+  const otherGroup = { id: '__other__', name: '기타', sortOrder: Number.MAX_SAFE_INTEGER, items: [], virtual: true };
+
+  (stocks || []).forEach(stock => {
+    const groupId = stock.meatTypeId ? getMeatTypeGroupId(stock.meatTypeId) : null;
+    const group = groupId && groupMap.has(groupId) ? groupMap.get(groupId) : otherGroup;
+    group.items.push(stock);
+  });
+
+  [...groups, otherGroup].forEach(group => {
+    group.items.sort((a, b) => {
+      const aOrder = getMeatTypeGroupSortOrder(a.meatTypeId);
+      const bOrder = getMeatTypeGroupSortOrder(b.meatTypeId);
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      const nameCompare = (a.meatNameSnapshot || '').localeCompare(b.meatNameSnapshot || '', 'ko');
+      if (nameCompare !== 0) return nameCompare;
+      return String(a.incomingDate || a.processedDate || a.repackedDate || '').localeCompare(String(b.incomingDate || b.processedDate || b.repackedDate || ''));
+    });
+  });
+
+  return otherGroup.items.length > 0 ? [...groups, otherGroup] : groups;
+}
+
+function renderStockLotGroups(stocks, options = {}) {
+  return '';
+  const {
+    emptyText = '등록된 재고 없음',
+    dateField = 'incomingDate',
+    dateLabel = '작업일',
+    showInitial = false,
+    showStaffNote = false,
+    typeTotals = null,
+    useTypeColor = false,
+  } = options;
+
+  if (!stocks || stocks.length === 0) {
+    return `<div style="text-align:center;color:#aaa;padding:20px;border:1px solid #eee;border-radius:6px;background:#fff;">${escapeHtml(emptyText)}</div>`;
+  }
+
+  const groups = buildStockLotGroups(stocks);
+  return `
+    <div class="stock-lot-group-wrap" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start;">
+      ${groups.map(group => `
+        <div class="stock-lot-group" style="flex:0 0 calc((100% - 50px) / 6);flex-grow:0;flex-shrink:0;min-width:0;max-width:calc((100% - 50px) / 6);background:#fff;border:1px solid #e8e8e8;border-radius:6px;overflow:hidden;">
+          <div style="display:flex;align-items:center;gap:6px;padding:5px 7px;background:#f1f3f5;border-bottom:1px solid #e8e8e8;font-weight:700;color:#444;font-size:12px;">
+            <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${escapeHtml(group.name)}</span>
+            <span style="font-size:11px;color:#888;">${group.items.length}</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;padding:5px;">
+            ${group.items.length === 0
+              ? '<div style="font-size:11px;color:#bbb;padding:3px 2px;">비어 있음</div>'
+              : group.items.map(stock => {
+                const typeTotal = typeTotals?.get(stock.meatTypeId || stock.meatNameSnapshot || stock.id)?.totalG ?? stock.remaining;
+                const color = useTypeColor ? getStockColor(typeTotal, stock.meatTypeId) : (stock.remaining < 0 ? '#e53e3e' : '#1a1a1a');
+                return `
+                  <div class="stock-lot-card" style="border:1px solid #ececec;border-radius:5px;padding:5px;background:${stock.batchColor || '#fff'}11;">
+                    <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+                      <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#444;font-size:12px;flex:1;">${escapeHtml(stock.meatNameSnapshot || '-')}</span>
+                      <b style="color:${color};font-variant-numeric:tabular-nums;font-size:12px;white-space:nowrap;">${(Number(stock.remaining || 0) / 1000).toFixed(2)}kg</b>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;gap:6px;margin-top:3px;color:#777;font-size:11px;">
+                      <span>${escapeHtml(dateLabel)}: ${escapeHtml(stock[dateField] || '-')}</span>
+                      ${showInitial ? `<span>초기 ${(Number(stock.initialQtyG || 0) / 1000).toFixed(2)}kg</span>` : ''}
+                    </div>
+                    ${showStaffNote ? `
+                      <div style="margin-top:2px;color:#888;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                        ${escapeHtml(stock.staffName || '-')} / ${escapeHtml(stock.note || '-')}
+                      </div>
+                    ` : ''}
+                    <div style="margin-top:4px;text-align:right;">
+                      <button class="btn-adjust" data-id="${stock.id}" data-name="${escapeHtml(stock.meatNameSnapshot || '')}" data-remaining="${stock.remaining}" style="padding:2px 7px;font-size:11px;">조정</button>
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function getMeatLogTimeValue(log) {
+  if (log?.timestamp?.toMillis) return log.timestamp.toMillis();
+  const value = log?.timestamp instanceof Date
+    ? log.timestamp.getTime()
+    : new Date(log?.timestamp || 0).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+function getMeatLogTypeKey(log) {
+  return log.meatTypeId || 'name:' + (log.meatNameSnapshot || '-');
+}
+
+function buildMeatLogTypeGroups(logs) {
+  const map = new Map();
+  (logs || []).forEach(log => {
+    const key = getMeatLogTypeKey(log);
+    if (!map.has(key)) {
+      map.set(key, {
+        key,
+        meatTypeId: log.meatTypeId || null,
+        name: log.meatNameSnapshot || '-',
+        latestTime: 0,
+        items: [],
+      });
+    }
+    const group = map.get(key);
+    group.items.push(log);
+    group.latestTime = Math.max(group.latestTime, getMeatLogTimeValue(log));
+  });
+
+  return [...map.values()].map(group => ({
+    ...group,
+    items: group.items.sort((a, b) => getMeatLogTimeValue(b) - getMeatLogTimeValue(a)),
+  })).sort((a, b) => {
+    const aOrder = getMeatTypeGroupSortOrder(a.meatTypeId);
+    const bOrder = getMeatTypeGroupSortOrder(b.meatTypeId);
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    const nameCompare = (a.name || '').localeCompare(b.name || '', 'ko');
+    if (nameCompare !== 0) return nameCompare;
+    return b.latestTime - a.latestTime;
+  });
+}
+
+function buildMeatLogGroups(logs) {
+  const groups = getScopedMeatStockCategories().map(g => ({ ...g, items: [], virtual: false }));
+  const groupMap = new Map(groups.map(g => [g.id, g]));
+  const otherGroup = { id: '__other__', name: '\uAE30\uD0C0', sortOrder: Number.MAX_SAFE_INTEGER, items: [], virtual: true };
+
+  (logs || []).forEach(log => {
+    const groupId = log.meatTypeId ? getMeatTypeGroupId(log.meatTypeId) : null;
+    const group = groupId && groupMap.has(groupId) ? groupMap.get(groupId) : otherGroup;
+    group.items.push(log);
+  });
+
+  [...groups, otherGroup].forEach(group => {
+    group.items.sort((a, b) => getMeatLogTimeValue(b) - getMeatLogTimeValue(a));
+  });
+
+  return otherGroup.items.length > 0 ? [...groups, otherGroup] : groups;
+}
+
+function renderMeatLogCard(log, typeName) {
+  return (
+    '<div style="border:1px solid #ececec;border-radius:5px;background:#fff;padding:4px 5px;">' +
+      '<div style="display:flex;align-items:center;gap:5px;min-width:0;">' +
+        '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#444;font-size:12px;flex:1;">' + escapeHtml(log.meatNameSnapshot || typeName || '-') + '</span>' +
+        '<span style="color:#777;font-size:11px;white-space:nowrap;">' + escapeHtml(formatMeatLogTimestamp(log.timestamp)) + '</span>' +
+        '<b style="color:' + (log.delta < 0 ? '#e53e3e' : '#2d7a3a') + ';font-size:12px;white-space:nowrap;">' + formatMeatLogQty(log.delta) + '</b>' +
+      '</div>' +
+      '<div style="display:flex;justify-content:space-between;gap:6px;margin-top:2px;color:#777;font-size:11px;">' +
+        '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(log.staff || '-') + ' / ' + escapeHtml(log.reason || '-') + '</span>' +
+        '<span style="white-space:nowrap;">' + escapeHtml(getMeatLogTypeLabel(log.type)) + '</span>' +
+      '</div>' +
+    '</div>'
+  );
+}
+
+function renderMeatLogTypeGroup(group, typeGroup) {
+  const typeId = [currentTab, group.id, typeGroup.key].join(':');
+  const expanded = expandedMeatLogTypeIds.has(typeId);
+  return (
+    '<div class="meat-log-type-group" style="border:1px solid #ececec;border-radius:5px;background:#fff;overflow:hidden;">' +
+      '<button type="button" class="meat-log-type-toggle" data-log-type-id="' + escapeHtml(typeId) + '" style="width:100%;border:0;background:#fff;display:flex;align-items:center;gap:5px;padding:5px 6px;cursor:pointer;text-align:left;">' +
+        '<span style="color:#888;font-size:11px;width:10px;text-align:center;flex-shrink:0;">' + (expanded ? '-' : '+') + '</span>' +
+        '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#333;font-size:12px;font-weight:700;flex:1;">' + escapeHtml(typeGroup.name) + '</span>' +
+        '<span style="color:#888;font-size:11px;white-space:nowrap;">' + typeGroup.items.length + '&#44148;</span>' +
+      '</button>' +
+      (expanded
+        ? '<div style="display:flex;flex-direction:column;gap:4px;border-top:1px solid #eee;background:#fafafa;padding:4px;">' +
+            typeGroup.items.map(log => renderMeatLogCard(log, typeGroup.name)).join('') +
+          '</div>'
+        : '') +
+    '</div>'
+  );
+}
+
+function renderMeatLogGroups(logs) {
+  if (!logs || logs.length === 0) {
+    return '<div style="text-align:center;color:#aaa;padding:20px;border:1px solid #eee;border-radius:6px;background:#fff;">&#51060;&#47141; &#50630;&#51020;</div>';
+  }
+
+  const groups = buildMeatLogGroups(logs).filter(group => group.items.length > 0);
+  if (groups.length === 0) {
+    return '<div style="text-align:center;color:#aaa;padding:20px;border:1px solid #eee;border-radius:6px;background:#fff;">&#51060;&#47141; &#50630;&#51020;</div>';
+  }
+
+  return (
+    '<div class="meat-log-group-wrap" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start;">' +
+      groups.map(group => {
+        const typeGroups = buildMeatLogTypeGroups(group.items);
+        return (
+          '<div class="meat-log-group" style="flex:0 0 calc((100% - 50px) / 6);flex-grow:0;flex-shrink:0;min-width:0;max-width:calc((100% - 50px) / 6);background:#fff;border:1px solid #e8e8e8;border-radius:6px;overflow:hidden;">' +
+            '<div style="display:flex;align-items:center;gap:6px;padding:5px 7px;background:#f1f3f5;border-bottom:1px solid #e8e8e8;font-weight:700;color:#444;font-size:12px;">' +
+              '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">' + escapeHtml(group.name) + '</span>' +
+              '<span style="font-size:11px;color:#888;">' + group.items.length + '</span>' +
+            '</div>' +
+            '<div style="display:flex;flex-direction:column;gap:4px;padding:5px;">' +
+              typeGroups.map(typeGroup => renderMeatLogTypeGroup(group, typeGroup)).join('') +
+            '</div>' +
+          '</div>'
+        );
+      }).join('') +
+    '</div>'
+  );
+}
+
+function initMeatLogGroups() {
+  document.querySelectorAll('.meat-log-type-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.logTypeId;
+      if (!id) return;
+      if (expandedMeatLogTypeIds.has(id)) expandedMeatLogTypeIds.delete(id);
+      else expandedMeatLogTypeIds.add(id);
+      renderTab(currentTab);
+    });
+  });
+}
+
+function destroyStockSummarySortables() {
+  [...stockSummarySortables, stockSummaryCategorySortable].filter(Boolean).forEach(sortable => {
+    try {
+      sortable.destroy();
+    } catch (err) {
+      console.warn('[meat] stock summary sortable destroy skipped:', err);
+    }
+  });
+  stockSummarySortables = [];
+  stockSummaryCategorySortable = null;
+}
+
+async function persistStockSummaryMeatTypeGroups() {
+  const batch = writeBatch(db);
+  const now = new Date();
+  const localUpdates = new Map();
+
+  document.querySelectorAll('.stock-summary-category-items').forEach(list => {
+    const groupId = list.dataset.categoryId === '__other__' ? null : list.dataset.categoryId;
+    Array.from(list.querySelectorAll('.stock-summary-cell[data-meat-type-id]')).forEach((cell, idx) => {
+      const meatTypeId = cell.dataset.meatTypeId;
+      if (!meatTypeId) return;
+      batch.update(doc(db, 'meatTypes', meatTypeId), {
+        groupId,
+        groupSortOrder: idx,
+        updatedAt: now,
+      });
+      localUpdates.set(meatTypeId, { groupId, groupSortOrder: idx, updatedAt: now });
+    });
+  });
+
+  await batch.commit();
+  meatTypes = await loadMeatTypes();
+  await renderTab(currentTab);
+}
+
+async function persistStockSummaryCategoryOrder() {
+  const scope = getCurrentStockCategoryScope();
+  const orderedIds = Array.from(document.querySelectorAll('.stock-summary-category-column[data-virtual="false"]'))
+    .map(col => col.dataset.categoryId)
+    .filter(Boolean);
+  const orderMap = new Map(orderedIds.map((id, idx) => [id, idx]));
+  const nextGroups = meatStockCategories
+    .map(g => (
+      (g.scope || 'meat') === scope
+        ? { ...g, sortOrder: orderMap.has(g.id) ? orderMap.get(g.id) : g.sortOrder }
+        : g
+    ))
+    .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+  await saveMeatStockCategories(nextGroups);
+}
+
+function initStockSummarySortable() {
+  destroyStockSummarySortables();
+  const canManage = currentUserRole === 'admin' || currentUserRole === 'office';
+
+  document.getElementById('btnMeatStockCategories')?.addEventListener('click', () => showMeatStockCategoriesModal());
+  document.querySelectorAll('.stock-summary-main').forEach(row => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.stock-summary-drag-handle')) return;
+      const cell = row.closest('.stock-summary-cell');
+      const id = cell?.dataset.summaryId;
+      if (!id) return;
+      if (collapsedStockSummaryIds.has(id)) collapsedStockSummaryIds.delete(id);
+      else collapsedStockSummaryIds.add(id);
+      renderTab(currentTab);
+    });
+  });
+  if (!canManage) return;
+
+  const columnsEl = document.querySelector('.stock-summary-columns');
+  if (columnsEl) {
+    stockSummaryCategorySortable = Sortable.create(columnsEl, {
+      animation: 150,
+      handle: '.stock-summary-category-handle',
+      draggable: '.stock-summary-category-column[data-virtual="false"]',
+      ghostClass: 'sortable-ghost',
+      chosenClass: 'sortable-chosen',
+      onEnd: async () => {
+        try {
+          await persistStockSummaryCategoryOrder();
+        } catch (err) {
+          console.error('[meat] stock category order save failed:', err);
+          alert('카테고리 순서 저장 실패: ' + (err.message || err));
+          meatStockCategories = await loadMeatStockCategories();
+          renderTab(currentTab);
+        }
+      },
+    });
+  }
+
+  document.querySelectorAll('.stock-summary-category-items').forEach(list => {
+    const sortable = Sortable.create(list, {
+      group: 'meatStockShared',
+      animation: 150,
+      handle: '.stock-summary-drag-handle',
+      draggable: '.stock-summary-cell',
+      ghostClass: 'sortable-ghost',
+      chosenClass: 'sortable-chosen',
+      onEnd: async () => {
+        try {
+          await persistStockSummaryMeatTypeGroups();
+        } catch (err) {
+          console.error('[meat] stock group save failed:', err);
+          alert('원료 카테고리 저장 실패: ' + (err.message || err));
+          meatTypes = await loadMeatTypes();
+          renderTab(currentTab);
+        }
+      },
+    });
+    stockSummarySortables.push(sortable);
   });
 }
 
@@ -312,6 +812,7 @@ async function renderTab(tab) {
   }
 
   initStockSummarySortable();
+  initMeatLogGroups();
 }
 
 // 냉동창고 탭
@@ -332,7 +833,14 @@ function renderFrozenTab(stocks, logs) {
         <span class="section-title">잔량</span>
       </div>
       ${renderStockSummary(meatStocks)}
-      <div class="table-wrap">
+      ${renderStockLotGroups(meatStocks, {
+        emptyText: '등록된 재고 없음',
+        dateField: 'incomingDate',
+        dateLabel: '입고일',
+        typeTotals: meatTotals,
+        useTypeColor: true,
+      })}
+      <div class="table-wrap" style="display:none;">
         <table class="data-table">
           <thead>
             <tr>
@@ -364,7 +872,8 @@ function renderFrozenTab(stocks, logs) {
       <div class="section-header">
         <span class="section-title">이력</span>
       </div>
-      <div class="table-wrap">
+      ${renderMeatLogGroups(meatLogs)}
+      <div class="table-wrap" style="display:none;">
         <table class="data-table">
           <thead>
             <tr>
@@ -426,7 +935,16 @@ function renderProduceTab(stocks, logs) {
         <span class="section-title">잔량</span>
       </div>
       ${renderStockSummary(produceStocks)}
-      <div class="table-wrap">
+      ${renderStockLotGroups(produceStocks, {
+        emptyText: '등록된 채소/과일 재고 없음',
+        dateField: 'incomingDate',
+        dateLabel: '입고일',
+        showInitial: true,
+        showStaffNote: true,
+        typeTotals: produceTotals,
+        useTypeColor: true,
+      })}
+      <div class="table-wrap" style="display:none;">
         <table class="data-table">
           <thead>
             <tr>
@@ -464,7 +982,8 @@ function renderProduceTab(stocks, logs) {
       <div class="section-header">
         <span class="section-title">이력</span>
       </div>
-      <div class="table-wrap">
+      ${renderMeatLogGroups(produceLogs)}
+      <div class="table-wrap" style="display:none;">
         <table class="data-table">
           <thead>
             <tr>
@@ -526,7 +1045,12 @@ function renderProcessedTab(stocks, logs) {
         <span class="section-title">잔량</span>
       </div>
       ${renderStockSummary(stocks)}
-      <div class="table-wrap">
+      ${renderStockLotGroups(stocks, {
+        emptyText: '등록된 전처리 재고 없음',
+        dateField: 'processedDate',
+        dateLabel: '작업일',
+      })}
+      <div class="table-wrap" style="display:none;">
         <table class="data-table">
           <thead>
             <tr>
@@ -555,7 +1079,8 @@ function renderProcessedTab(stocks, logs) {
       <div class="section-header">
         <span class="section-title">이력</span>
       </div>
-      <div class="table-wrap">
+      ${renderMeatLogGroups(logs)}
+      <div class="table-wrap" style="display:none;">
         <table class="data-table">
           <thead>
             <tr>
@@ -604,7 +1129,12 @@ function renderRepackedTab(stocks, logs) {
         <span class="section-title">잔량</span>
       </div>
       ${renderStockSummary(stocks)}
-      <div class="table-wrap">
+      ${renderStockLotGroups(stocks, {
+        emptyText: '등록된 재포장 재고 없음',
+        dateField: 'repackedDate',
+        dateLabel: '작업일',
+      })}
+      <div class="table-wrap" style="display:none;">
         <table class="data-table">
           <thead>
             <tr>
@@ -633,7 +1163,8 @@ function renderRepackedTab(stocks, logs) {
       <div class="section-header">
         <span class="section-title">이력</span>
       </div>
-      <div class="table-wrap">
+      ${renderMeatLogGroups(logs)}
+      <div class="table-wrap" style="display:none;">
         <table class="data-table">
           <thead>
             <tr>
@@ -738,6 +1269,10 @@ function showAddFrozenModal(options = {}) {
 
     if (!meatTypeId || !weight || !date) {
       alert(`${itemLabel} 종류, 중량, 날짜는 필수입니다.`);
+      return;
+    }
+    if (!(weight > 0)) {
+      alert('중량은 0보다 커야 합니다.');
       return;
     }
     if (!staff) {
@@ -860,6 +1395,10 @@ function showAddProcessedModal() {
 
     if (!meatTypeId || !unitWeight || !count || !date) {
       alert('원육 종류, 개당 중량, 개수, 날짜는 필수입니다.');
+      return;
+    }
+    if (!(unitWeight > 0) || !(count > 0)) {
+      alert('개당 중량과 개수는 0보다 커야 합니다.');
       return;
     }
     if (!staff) {
@@ -1017,6 +1556,10 @@ function showAddRepackedModal() {
 
     if (!meatTypeId || !unitWeight || !count || !date) {
       alert('원육 종류, 개당 중량, 개수, 날짜는 필수입니다.');
+      return;
+    }
+    if (!(unitWeight > 0) || !(count > 0)) {
+      alert('개당 중량과 개수는 0보다 커야 합니다.');
       return;
     }
     if (!staff) {
@@ -1227,6 +1770,167 @@ function showAdjustModal(id, name, remaining) {
 }
 
 // 원육 종류 관리 모달
+function renderMeatStockCategoryRows() {
+  const scopedCategories = getScopedMeatStockCategories();
+  if (scopedCategories.length === 0) {
+    return '<tr><td colspan="4" style="text-align:center;color:#aaa;padding:16px;">등록된 카테고리 없음</td></tr>';
+  }
+  return scopedCategories.map(group => {
+    const count = meatTypes.filter(m => m.groupId === group.id).length;
+    return `
+      <tr data-id="${group.id}">
+        <td class="master-table-drag-cell">
+          <span class="drag-handle" title="순서 변경" aria-label="순서 변경">⠿</span>
+        </td>
+        <td>
+          <input type="text" class="stock-category-name" data-id="${group.id}" value="${escapeHtml(group.name)}"
+                 style="width:100%;padding:5px 6px;" />
+        </td>
+        <td style="text-align:right;color:#666;">${count}</td>
+        <td>
+          <button type="button" class="btn-secondary btn-delete-stock-category" data-id="${group.id}">삭제</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+async function refreshMeatStockCategoryModal() {
+  meatTypes = await loadMeatTypes();
+  meatStockCategories = await loadMeatStockCategories();
+  await renderTab(currentTab);
+  showMeatStockCategoriesModal();
+}
+
+function showMeatStockCategoriesModal() {
+  if (currentUserRole !== 'admin' && currentUserRole !== 'office') {
+    alert('카테고리 관리는 대표/사무실 계정만 가능합니다.');
+    return;
+  }
+
+  showModal(`
+    <h3 class="modal-title">원료 잔량표 카테고리 관리</h3>
+    <div class="table-wrap" style="margin-bottom:14px;">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th class="master-table-drag-col"></th>
+            <th>카테고리명</th>
+            <th style="text-align:right;">원료 수</th>
+            <th>삭제</th>
+          </tr>
+        </thead>
+        <tbody id="meatStockCategoryList">
+          ${renderMeatStockCategoryRows()}
+        </tbody>
+      </table>
+    </div>
+    <div style="background:#f9f9f9;border-radius:6px;padding:12px;border:1px solid #eee;">
+      <label style="display:block;font-size:12px;font-weight:600;margin-bottom:6px;">새 카테고리</label>
+      <div style="display:flex;gap:8px;">
+        <input type="text" id="newStockCategoryName" placeholder="예: 닭 / 오리 / 생선" style="flex:1;" />
+        <button type="button" class="btn-primary" id="btnAddStockCategory">추가</button>
+      </div>
+    </div>
+    <div class="modal-actions" style="margin-top:16px;">
+      <button class="btn-secondary" onclick="closeModal()">닫기</button>
+    </div>
+  `);
+
+  const scope = getCurrentStockCategoryScope();
+  const scopedCategories = getScopedMeatStockCategories(scope);
+  const listEl = document.getElementById('meatStockCategoryList');
+  if (listEl && scopedCategories.length > 0) {
+    Sortable.create(listEl, {
+      handle: '.drag-handle',
+      animation: 150,
+      ghostClass: 'sortable-ghost',
+      chosenClass: 'sortable-chosen',
+      onEnd: async () => {
+        const orderedIds = Array.from(listEl.querySelectorAll('tr[data-id]')).map(row => row.dataset.id);
+        const orderMap = new Map(orderedIds.map((id, idx) => [id, idx]));
+        try {
+          await saveMeatStockCategories(meatStockCategories.map(g => (
+            (g.scope || 'meat') === scope
+              ? { ...g, sortOrder: orderMap.has(g.id) ? orderMap.get(g.id) : g.sortOrder }
+              : g
+          )));
+          await renderTab(currentTab);
+        } catch (err) {
+          console.error('[meat] stock category modal order save failed:', err);
+          alert('카테고리 순서 저장 실패: ' + (err.message || err));
+          meatStockCategories = await loadMeatStockCategories();
+          showMeatStockCategoriesModal();
+        }
+      },
+    });
+  }
+
+  document.querySelectorAll('.stock-category-name').forEach(input => {
+    input.addEventListener('change', async (e) => {
+      const id = e.target.dataset.id;
+      const name = e.target.value.trim();
+      const target = scopedCategories.find(g => g.id === id);
+      if (!target) return;
+      if (!name) {
+        alert('카테고리명을 입력해주세요.');
+        e.target.value = target.name;
+        return;
+      }
+      try {
+        await saveMeatStockCategories(meatStockCategories.map(g => g.id === id ? { ...g, name } : g));
+        await renderTab(currentTab);
+      } catch (err) {
+        console.error('[meat] stock category rename failed:', err);
+        alert('카테고리명 저장 실패: ' + (err.message || err));
+        e.target.value = target.name;
+      }
+    });
+  });
+
+  document.getElementById('btnAddStockCategory')?.addEventListener('click', async () => {
+    const input = document.getElementById('newStockCategoryName');
+    const name = input.value.trim();
+    if (!name) { alert('카테고리명을 입력해주세요.'); return; }
+    const nextGroups = [
+      ...meatStockCategories,
+      { id: createMeatStockCategoryId(), name, sortOrder: scopedCategories.length, scope },
+    ];
+    try {
+      await saveMeatStockCategories(nextGroups);
+      await refreshMeatStockCategoryModal();
+    } catch (err) {
+      console.error('[meat] stock category add failed:', err);
+      alert('카테고리 추가 실패: ' + (err.message || err));
+    }
+  });
+
+  document.querySelectorAll('.btn-delete-stock-category').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      const group = scopedCategories.find(g => g.id === id);
+      if (!group) return;
+      try {
+        const now = new Date();
+        const batch = writeBatch(db);
+        meatTypes.filter(m => m.groupId === id).forEach(m => {
+          batch.update(doc(db, 'meatTypes', m.id), {
+            groupId: null,
+            groupSortOrder: 0,
+            updatedAt: now,
+          });
+        });
+        await batch.commit();
+        await saveMeatStockCategories(meatStockCategories.filter(g => g.id !== id));
+        await refreshMeatStockCategoryModal();
+      } catch (err) {
+        console.error('[meat] stock category delete failed:', err);
+        alert('카테고리 삭제 실패: ' + (err.message || err));
+      }
+    });
+  });
+}
+
 function showMeatTypesModal(options = {}) {
   const { categoryFilter = null } = options;
   const effectiveCategoryFilter = categoryFilter || 'meat';
